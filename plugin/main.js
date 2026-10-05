@@ -35,7 +35,7 @@ __export(main_exports, {
   default: () => JarvisSurfacePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian6 = require("obsidian");
+var import_obsidian8 = require("obsidian");
 
 // src/views/types.ts
 var LIVE_DOT = {
@@ -167,6 +167,439 @@ function agoLabel(seconds) {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
+// src/views/dashboard.ts
+var import_obsidian2 = require("obsidian");
+
+// src/views/continue-doc.ts
+var EMPTY_CONTINUE = {
+  status: "",
+  decided: [],
+  next: [],
+  gates: []
+};
+function splitFrontmatter(md) {
+  if (!md.startsWith("---")) return ["", md];
+  const end = md.indexOf("\n---", 3);
+  if (end < 0) return ["", md];
+  const fmEnd = md.indexOf("\n", end + 1);
+  return [md.slice(3, end), md.slice(fmEnd < 0 ? md.length : fmEnd + 1)];
+}
+function frontmatterStatus(fm) {
+  for (const line of fm.split("\n")) {
+    const m = /^status:\s*(.*)$/.exec(line);
+    if (m) return m[1].trim().replace(/^["']|["']$/g, "");
+  }
+  return "";
+}
+function sectionLines(body, name) {
+  const lines = body.split("\n");
+  const out = [];
+  let inSection = false;
+  const head = new RegExp("^#{1,6}\\s+" + name + "\\s*$", "i");
+  for (const line of lines) {
+    if (/^#{1,6}\s+/.test(line)) {
+      if (inSection) break;
+      inSection = head.test(line);
+      continue;
+    }
+    if (inSection) out.push(line);
+  }
+  return out;
+}
+function bullets(lines) {
+  const out = [];
+  for (const raw of lines) {
+    const m = /^\s*[-*]\s+(.*)$/.exec(raw);
+    if (m && m[1].trim()) out.push(m[1].trim());
+  }
+  return out;
+}
+function parseContinue(md) {
+  if (!md || typeof md !== "string") return { ...EMPTY_CONTINUE };
+  const [fm, body] = splitFrontmatter(md);
+  const decided = bullets(sectionLines(body, "Decided"));
+  const gates = bullets(sectionLines(body, "Gates"));
+  const next = bullets(sectionLines(body, "Next")).filter((b) => !/^\[[xX]\]/.test(b)).map((b) => b.replace(/^\[\s?\]\s*/, "").trim()).filter(Boolean);
+  return {
+    status: frontmatterStatus(fm),
+    decided,
+    gates,
+    next
+  };
+}
+
+// src/views/steer.ts
+var import_obsidian = require("obsidian");
+function trimBase(u) {
+  return (u || "").replace(/\/+$/, "");
+}
+var SteerClient = class {
+  constructor(base, token) {
+    this.base = base;
+    this.token = token;
+  }
+  /** True only when both an endpoint and a bearer are present — the modal greys the
+   *  steer controls otherwise rather than firing a request that can only 401/404. */
+  get configured() {
+    return !!trimBase(this.base) && !!this.token;
+  }
+  authHeaders() {
+    return {
+      Authorization: `Bearer ${this.token}`,
+      "Content-Type": "application/json"
+    };
+  }
+  errFrom(status, text) {
+    try {
+      const j = JSON.parse(text);
+      if (j && typeof j.error === "string") return j.error;
+    } catch {
+    }
+    return text ? text.slice(0, 200) : `HTTP ${status}`;
+  }
+  /** Read what the pane is CURRENTLY asking. Pane ids start with "%", so the query is
+   *  encodeURIComponent'd — an undecoded "%6" becomes "%256" daemon-side and finds no
+   *  pane (a bug the daemon's own comments call out). */
+  async menu(host, pane) {
+    if (!this.configured) {
+      return { kind: "error", status: 0, error: "steering not configured" };
+    }
+    const url = trimBase(this.base) + "/menu?host=" + encodeURIComponent(host) + "&pane=" + encodeURIComponent(pane);
+    try {
+      const r = await (0, import_obsidian.requestUrl)({
+        url,
+        method: "GET",
+        headers: { Authorization: `Bearer ${this.token}` },
+        throw: false
+      });
+      if (r.status !== 200) {
+        return { kind: "error", status: r.status, error: this.errFrom(r.status, r.text) };
+      }
+      const body = r.json ?? JSON.parse(r.text);
+      if (body.menu && Array.isArray(body.menu.options) && body.menu.options.length) {
+        return { kind: "menu", menu: body.menu };
+      }
+      return { kind: "none", tail: body.tail ?? "" };
+    } catch (e) {
+      return { kind: "error", status: 0, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  async post(sub, payload, okDetail) {
+    if (!this.configured) {
+      return { kind: "error", status: 0, error: "steering not configured" };
+    }
+    try {
+      const r = await (0, import_obsidian.requestUrl)({
+        url: trimBase(this.base) + sub,
+        method: "POST",
+        headers: this.authHeaders(),
+        body: JSON.stringify(payload),
+        throw: false
+      });
+      if (r.status === 200) {
+        const body = r.json ?? JSON.parse(r.text);
+        return { kind: "ok", detail: okDetail(body) };
+      }
+      if (r.status === 409) {
+        return { kind: "refused", error: this.errFrom(r.status, r.text) };
+      }
+      return { kind: "error", status: r.status, error: this.errFrom(r.status, r.text) };
+    } catch (e) {
+      return { kind: "error", status: 0, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  /** Type one line into the pane and press Enter. Daemon refuses newlines / over-long lines. */
+  say(host, pane, text) {
+    return this.post("/say", { host, pane, text }, (b) => `said: ${String(b.said ?? text)}`);
+  }
+  /** Pick 0-based `option` of the menu the pane is CURRENTLY showing. `expect` is the
+   *  option text we rendered — the daemon refuses (409) if the menu moved since, so a
+   *  slow tap can never answer a question that has already changed. */
+  choose(host, pane, option, expect) {
+    return this.post(
+      "/choose",
+      { host, pane, option, ...expect != null ? { expect } : {} },
+      (b) => `chose: ${String(b.chose ?? option)}`
+    );
+  }
+  /** Send ESC — cancel the pane's current prompt. */
+  interrupt(host, pane) {
+    return this.post("/interrupt", { host, pane }, () => "interrupted");
+  }
+};
+
+// src/views/dashboard.ts
+var REFRESH_MS = 5e3;
+var NOTE_PEEK = 600;
+function trimBase2(u) {
+  return (u || "").replace(/\/+$/, "");
+}
+var DashboardModal = class extends import_obsidian2.Modal {
+  // Constructor-assigned, NOT class-field initializers: esbuild (es2018) emits native
+  // class fields that the iOS Obsidian WebView does not run on a Modal subclass, which
+  // left AskModal blank on the iPad. Assign in the constructor body so it always runs.
+  deps;
+  card;
+  doc;
+  panels;
+  timer;
+  /** The menu the pane is currently asking, when the approve/reject panel is open. */
+  menuOpen;
+  constructor(deps, card) {
+    super(deps.app);
+    this.deps = deps;
+    this.card = card;
+    this.doc = { ...EMPTY_CONTINUE };
+    this.panels = [];
+    this.timer = null;
+    this.menuOpen = false;
+  }
+  get slug() {
+    return this.card.slug;
+  }
+  steer() {
+    const b = this.deps.getSettings().board;
+    return new SteerClient(b.daemonUrl, b.steerToken);
+  }
+  onOpen() {
+    this.modalEl.addClass("jarvis-dash");
+    this.draw();
+    void this.loadDoc();
+    void this.loadPanels();
+    void this.refreshCard();
+    this.timer = window.setInterval(() => void this.refreshCard(), REFRESH_MS);
+  }
+  onClose() {
+    if (this.timer != null) window.clearInterval(this.timer);
+    this.timer = null;
+    this.contentEl.empty();
+  }
+  // --- async loads -------------------------------------------------------------
+  /** Read + parse this project's CONTINUE.md off the vault adapter (iOS-safe). A project
+   *  that lives in another vault (e.g. ~/PersonalVault) or has no CONTINUE.md simply
+   *  leaves `doc` empty and the modal falls back to the daemon card. */
+  async loadDoc() {
+    const path = `01-Projects/${this.slug}/CONTINUE.md`;
+    try {
+      const adapter = this.deps.app.vault.adapter;
+      if (!await adapter.exists(path)) return;
+      this.doc = parseContinue(await adapter.read(path));
+      this.draw();
+    } catch {
+    }
+  }
+  /** Read an optional `dashboard.yaml` for extra panels (the "shared + overrides" ruling).
+   *  Absent / malformed → no panels, never an error. */
+  async loadPanels() {
+    const path = `01-Projects/${this.slug}/dashboard.yaml`;
+    try {
+      const adapter = this.deps.app.vault.adapter;
+      if (!await adapter.exists(path)) return;
+      const parsed = (0, import_obsidian2.parseYaml)(await adapter.read(path));
+      if (parsed && Array.isArray(parsed.panels)) {
+        this.panels = parsed.panels.filter((p) => !!p && typeof p.title === "string").map((p) => ({ title: p.title, note: p.note, text: p.text }));
+        this.draw();
+      }
+    } catch {
+    }
+  }
+  /** Re-pull the ranked feed and refresh THIS card (badge/status/next go live). Quiet on
+   *  failure — a transient daemon blip must not blank a modal the user is reading. */
+  async refreshCard() {
+    const base = trimBase2(this.deps.getSettings().board.daemonUrl);
+    if (!base) return;
+    try {
+      const r = await (0, import_obsidian2.requestUrl)({ url: base + "/projects", method: "GET", throw: false });
+      if (r.status !== 200) return;
+      const payload = r.json ?? JSON.parse(r.text);
+      const fresh = (payload.projects ?? []).find((c) => c.slug === this.slug);
+      if (fresh) {
+        this.card = fresh;
+        this.draw();
+      }
+    } catch {
+    }
+  }
+  // --- render ------------------------------------------------------------------
+  draw() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("jarvis-dash-content");
+    const live = this.card.live ?? null;
+    const head = contentEl.createDiv({ cls: "jarvis-dash-head" });
+    head.createEl("div", { cls: "jarvis-dash-brand", text: "\u25C6 JARVIS \xB7 project" });
+    const titleRow = head.createDiv({ cls: "jarvis-dash-titlerow" });
+    titleRow.createEl("div", { cls: "jarvis-dash-title", text: this.slug });
+    const badge = titleRow.createDiv({ cls: "jarvis-dash-badge" });
+    if (live) {
+      badge.createSpan({ cls: `cockpit-dot cockpit-dot--${live.status}`, text: LIVE_DOT[live.status] });
+      badge.createSpan({ cls: "jarvis-dash-state", text: live.status });
+      if (live.host_key) badge.createSpan({ cls: "jarvis-dash-host", text: live.host_key });
+      if (!live.injectable) badge.createSpan({ cls: "jarvis-dash-monitor", text: "monitor-only" });
+    } else if (this.card.session) {
+      badge.createSpan({ cls: "cockpit-dot cockpit-dot--unknown", text: "\u25CD" });
+      badge.createSpan({ cls: "jarvis-dash-state", text: "up, no beacon" });
+    } else {
+      badge.createSpan({ cls: "cockpit-dot cockpit-dot--cold", text: "\u25CB" });
+      badge.createSpan({ cls: "jarvis-dash-state", text: "idle" });
+    }
+    const status = this.doc.status || this.card.status || "\u2014";
+    contentEl.createDiv({ cls: "jarvis-dash-status", text: status });
+    const nextText = this.card.next || this.doc.next[0] || "";
+    contentEl.createDiv({ cls: "jarvis-dash-next" }).createSpan({
+      cls: nextText ? "jarvis-dash-next-text" : "jarvis-dash-next-text jarvis-dash-next-text--none",
+      text: nextText ? `NEXT \u2192 ${nextText}` : "NEXT \u2192 \u2014"
+    });
+    this.drawControls(contentEl, live);
+    if (this.doc.decided.length) this.drawList(contentEl, "Decided", this.doc.decided.slice(-6));
+    if (this.doc.gates.length) this.drawList(contentEl, "Gates", this.doc.gates.slice(0, 6));
+    if (this.doc.next.length > 1) this.drawList(contentEl, "Next", this.doc.next.slice(0, 6));
+    for (const p of this.panels) this.drawPanel(contentEl, p);
+    const foot = contentEl.createDiv({ cls: "jarvis-dash-foot" });
+    const openNote = foot.createEl("button", { cls: "jarvis-dash-btn jarvis-dash-btn--ghost", text: "open CONTINUE.md" });
+    openNote.addEventListener("click", () => {
+      void this.deps.app.workspace.openLinkText(`01-Projects/${this.slug}/CONTINUE.md`, "", false);
+      this.close();
+    });
+  }
+  drawControls(parent, live) {
+    const injectable = !!live?.injectable;
+    const host = live?.host ?? "";
+    const pane = live?.pane ?? "";
+    const wrap = parent.createDiv({ cls: "jarvis-dash-controls" });
+    const resume = wrap.createEl("button", { cls: "jarvis-dash-btn jarvis-dash-btn--primary" });
+    resume.setText(live ? "open terminal \u29C9" : "resume / open terminal \u29C9");
+    resume.addEventListener("click", () => this.openTerminal());
+    const esc = wrap.createEl("button", { cls: "jarvis-dash-btn", text: "interrupt \u238B" });
+    esc.disabled = !injectable;
+    esc.addEventListener("click", () => void this.doInterrupt(host, pane, esc));
+    const approve = wrap.createEl("button", { cls: "jarvis-dash-btn", text: "answer prompt \u25B8" });
+    approve.disabled = !injectable;
+    approve.addEventListener("click", () => void this.toggleMenu(host, pane, parent));
+    const steerRow = parent.createDiv({ cls: "jarvis-dash-steerrow" });
+    const input = steerRow.createEl("input", {
+      cls: "jarvis-dash-steerinput",
+      attr: { type: "text", placeholder: injectable ? "Steer: type a line\u2026" : "No live pane to steer" }
+    });
+    input.disabled = !injectable;
+    const send = steerRow.createEl("button", { cls: "jarvis-dash-btn jarvis-dash-btn--primary", text: "send" });
+    send.disabled = !injectable;
+    const fire = () => {
+      const text = input.value.trim();
+      if (!text) return;
+      void this.doSay(host, pane, text, send, input);
+    };
+    send.addEventListener("click", fire);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") fire();
+    });
+    if (this.menuOpen) this.drawMenuPanel(parent, host, pane);
+  }
+  openTerminal() {
+    const term = this.deps.getSettings().term;
+    if (!term.wsUrl) {
+      new import_obsidian2.Notice("Terminal not configured (Settings \u2192 JARVIS Surface \u2192 Terminal). The ttyd view is a follow-on unit.");
+      return;
+    }
+    let httpUrl = term.wsUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+    try {
+      const u = new URL(httpUrl);
+      httpUrl = `${u.protocol}//${u.host}/`;
+    } catch {
+    }
+    if (import_obsidian2.Platform.isMobile) {
+      new import_obsidian2.Notice(`Terminal: ${httpUrl} (in-plugin term view is a follow-on unit)`);
+    } else {
+      window.open(httpUrl, "_blank");
+    }
+  }
+  async doInterrupt(host, pane, btn) {
+    btn.disabled = true;
+    const r = await this.steer().interrupt(host, pane);
+    this.reportSteer(r, "Interrupt sent");
+    btn.disabled = false;
+  }
+  async doSay(host, pane, text, btn, input) {
+    btn.disabled = true;
+    const r = await this.steer().say(host, pane, text);
+    this.reportSteer(r, `Sent: ${text}`);
+    if (r.kind === "ok") input.value = "";
+    btn.disabled = false;
+  }
+  toggleMenu(host, pane, parent) {
+    this.menuOpen = !this.menuOpen;
+    this.draw();
+  }
+  /** Render the pane's current menu as tap-to-choose options (approve/reject = pick N). */
+  async drawMenuPanel(parent, host, pane) {
+    const box = parent.createDiv({ cls: "jarvis-dash-menu" });
+    box.createEl("div", { cls: "jarvis-dash-menu-load", text: "Reading the prompt\u2026" });
+    const res = await this.steer().menu(host, pane);
+    box.empty();
+    if (res.kind === "error") {
+      box.createEl("div", { cls: "jarvis-dash-menu-err", text: `Could not read the prompt: ${res.error}` });
+      return;
+    }
+    if (res.kind === "none") {
+      box.createEl("div", { cls: "jarvis-dash-menu-none", text: "The pane is not showing a menu right now." });
+      return;
+    }
+    box.createEl("div", { cls: "jarvis-dash-menu-q", text: res.menu.question || "(no question text)" });
+    res.menu.options.forEach((opt, i) => {
+      const b = box.createEl("button", { cls: "jarvis-dash-menu-opt" });
+      b.createEl("span", { cls: "jarvis-dash-menu-n", text: String(i + 1) });
+      b.createEl("span", { cls: "jarvis-dash-menu-label", text: opt });
+      b.addEventListener("click", () => void this.doChoose(host, pane, i, opt, b));
+    });
+  }
+  async doChoose(host, pane, option, expect, btn) {
+    btn.disabled = true;
+    btn.addClass("is-choosing");
+    const r = await this.steer().choose(host, pane, option, expect);
+    this.reportSteer(r, `Chose: ${expect}`);
+    if (r.kind === "ok") {
+      this.menuOpen = false;
+      this.draw();
+    } else {
+      btn.disabled = false;
+      btn.removeClass("is-choosing");
+    }
+  }
+  reportSteer(r, okMsg) {
+    if (r.kind === "ok") new import_obsidian2.Notice(okMsg);
+    else if (r.kind === "refused") new import_obsidian2.Notice(`Refused: ${r.error}`);
+    else new import_obsidian2.Notice(`Steer failed: ${r.error}`);
+  }
+  drawList(parent, title, items) {
+    const sec = parent.createDiv({ cls: "jarvis-dash-sec" });
+    sec.createEl("div", { cls: "jarvis-dash-sec-title", text: title });
+    const ul = sec.createEl("ul", { cls: "jarvis-dash-sec-list" });
+    for (const it of items) ul.createEl("li", { text: it });
+  }
+  async drawPanel(parent, p) {
+    const sec = parent.createDiv({ cls: "jarvis-dash-sec jarvis-dash-sec--panel" });
+    sec.createEl("div", { cls: "jarvis-dash-sec-title", text: p.title });
+    if (p.text) {
+      sec.createEl("div", { cls: "jarvis-dash-panel-text", text: p.text });
+      return;
+    }
+    if (p.note) {
+      const body = sec.createEl("div", { cls: "jarvis-dash-panel-text", text: "\u2026" });
+      try {
+        const adapter = this.deps.app.vault.adapter;
+        if (await adapter.exists(p.note)) {
+          const raw = await adapter.read(p.note);
+          body.setText(raw.slice(0, NOTE_PEEK) + (raw.length > NOTE_PEEK ? "\u2026" : ""));
+        } else {
+          body.setText(`(missing: ${p.note})`);
+        }
+      } catch {
+        body.setText(`(unreadable: ${p.note})`);
+      }
+    }
+  }
+};
+
 // src/state/settings.ts
 var SCHEMA_VERSION = 1;
 var DEFAULT_SETTINGS = {
@@ -291,11 +724,11 @@ function seedFromLegacy(remoteData, boardData, pocketData) {
 }
 
 // src/remote/client.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 // src/remote/dispatcher.ts
 var obsidian = __toESM(require("obsidian"), 1);
-var import_obsidian = require("obsidian");
+var import_obsidian3 = require("obsidian");
 var ALLOWED_OPS = [
   "hello",
   "notice",
@@ -314,12 +747,12 @@ var RemoteDispatcher = class {
   }
   fileByPath(path) {
     const af = this.deps.app.vault.getAbstractFileByPath(path);
-    return af instanceof import_obsidian.TFile ? af : null;
+    return af instanceof import_obsidian3.TFile ? af : null;
   }
   // Flip the active markdown view between Reading (preview) and Source. Anything
   // that is not "reading"/"preview" means Source, exactly as the original.
   async setMode(mode) {
-    const view = this.deps.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    const view = this.deps.app.workspace.getActiveViewOfType(import_obsidian3.MarkdownView);
     if (!view) return;
     const state = view.getState();
     state.mode = mode === "reading" || mode === "preview" ? "preview" : "source";
@@ -330,7 +763,7 @@ var RemoteDispatcher = class {
     const { app, ack } = this.deps;
     if (cmd.op === "eval" && !this.deps.allowEval()) {
       await ack(cmd.id, false, "refused: eval is fenced (Settings -> JARVIS surface -> Allow eval)");
-      new import_obsidian.Notice("JARVIS remote: refused a pushed eval (fenced)");
+      new import_obsidian3.Notice("JARVIS remote: refused a pushed eval (fenced)");
       return;
     }
     if (cmd.op !== "eval" && !ALLOWED_OPS.includes(cmd.op)) {
@@ -340,7 +773,7 @@ var RemoteDispatcher = class {
     try {
       switch (cmd.op) {
         case "notice":
-          new import_obsidian.Notice(String(cmd.msg ?? ""));
+          new import_obsidian3.Notice(String(cmd.msg ?? ""));
           break;
         case "open":
           await app.workspace.openLinkText(cmd.path ?? "", "", !!cmd.newLeaf);
@@ -348,7 +781,7 @@ var RemoteDispatcher = class {
           break;
         case "openstream":
           if (this.deps.openStream) await this.deps.openStream();
-          else new import_obsidian.Notice("JARVIS remote: stream view is not ported in this build");
+          else new import_obsidian3.Notice("JARVIS remote: stream view is not ported in this build");
           break;
         case "mode":
           await this.setMode(cmd.mode);
@@ -401,17 +834,17 @@ var RemoteDispatcher = class {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       await ack(cmd.id, false, msg);
-      new import_obsidian.Notice("JARVIS remote: " + msg);
+      new import_obsidian3.Notice("JARVIS remote: " + msg);
     }
   }
 };
 
 // src/remote/client.ts
-function trimBase(u) {
+function trimBase3(u) {
   return (u || "").replace(/\/+$/, "");
 }
 function genClientId() {
-  const P = import_obsidian2.Platform;
+  const P = import_obsidian4.Platform;
   const kind = P.isIosApp ? "ios" : P.isAndroidApp ? "android" : P.isMacOS ? "mac" : P.isWin ? "win" : P.isLinux ? "linux" : P.isMobile ? "mobile" : "desktop";
   let rand = "";
   try {
@@ -466,7 +899,7 @@ var RemoteClient = class {
     try {
       while (!this.stopped) {
         const s = this.deps.getSettings();
-        const base = trimBase(s.baseUrl);
+        const base = trimBase3(s.baseUrl);
         const bearer = s.bearer;
         if (!base || !bearer) {
           await this.sleep(RETRY_MS);
@@ -475,7 +908,7 @@ var RemoteClient = class {
         try {
           const after = this.cursor;
           const url = base + "/cmd/poll?bearer=" + encodeURIComponent(bearer) + "&client=" + encodeURIComponent(this.clientId) + (after != null ? "&after=" + after : "");
-          const r = await (0, import_obsidian2.requestUrl)({ url, method: "GET", throw: false });
+          const r = await (0, import_obsidian4.requestUrl)({ url, method: "GET", throw: false });
           if (r.status === 200) {
             const body = r.json ?? JSON.parse(r.text);
             if (Array.isArray(body.cmds)) {
@@ -497,10 +930,10 @@ var RemoteClient = class {
   async ack(id, ok, result) {
     if (id == null) return;
     const s = this.deps.getSettings();
-    const base = trimBase(s.baseUrl);
+    const base = trimBase3(s.baseUrl);
     if (!base || !s.bearer) return;
     try {
-      await (0, import_obsidian2.requestUrl)({
+      await (0, import_obsidian4.requestUrl)({
         url: base + "/cmd/ack?bearer=" + encodeURIComponent(s.bearer),
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -518,11 +951,11 @@ var RemoteClient = class {
 };
 
 // src/ask/ask-loop.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/ask/ask-modal.ts
-var import_obsidian3 = require("obsidian");
-var AskModal = class extends import_obsidian3.Modal {
+var import_obsidian5 = require("obsidian");
+var AskModal = class extends import_obsidian5.Modal {
   qid;
   questions;
   settleFn;
@@ -758,7 +1191,7 @@ var AskLoop = class {
     if (this.polling || this.stopped) return;
     this.polling = true;
     try {
-      const res = await (0, import_obsidian4.requestUrl)({
+      const res = await (0, import_obsidian6.requestUrl)({
         url: `${this.brokerBase}/pending`,
         method: "GET",
         throw: false
@@ -800,7 +1233,7 @@ var AskLoop = class {
   }
   async postAnswer(qid, answers) {
     try {
-      await (0, import_obsidian4.requestUrl)({
+      await (0, import_obsidian6.requestUrl)({
         url: `${this.brokerBase}/answer`,
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -813,8 +1246,8 @@ var AskLoop = class {
 };
 
 // src/ui/settings-tab.ts
-var import_obsidian5 = require("obsidian");
-var JarvisSettingTab = class extends import_obsidian5.PluginSettingTab {
+var import_obsidian7 = require("obsidian");
+var JarvisSettingTab = class extends import_obsidian7.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -834,24 +1267,24 @@ var JarvisSettingTab = class extends import_obsidian5.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     const s = this.plugin.settings;
-    new import_obsidian5.Setting(containerEl).setName("Remote command channel").setHeading();
+    new import_obsidian7.Setting(containerEl).setName("Remote command channel").setHeading();
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text: "Tailnet-only, bearer-gated SSE channel. Deborah / the orchestrator pushes ops (open a note, run a command, append) and this device executes them. Nothing connects until both a base URL and a bearer are set."
     });
-    new import_obsidian5.Setting(containerEl).setName("Enable remote control").setDesc("Hold the command socket open and execute pushed ops.").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Enable remote control").setDesc("Hold the command socket open and execute pushed ops.").addToggle(
       (t) => t.setValue(s.remote.remoteControl).onChange(async (v) => {
         s.remote.remoteControl = v;
         await this.save(true);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Base URL").setDesc("The keystone inbound, e.g. https://mac-mini.tail1fd1c8.ts.net/jarvis").addText(
+    new import_obsidian7.Setting(containerEl).setName("Base URL").setDesc("The keystone inbound, e.g. https://mac-mini.tail1fd1c8.ts.net/jarvis").addText(
       (t) => t.setPlaceholder("https://mac-mini.tail1fd1c8.ts.net/jarvis").setValue(s.remote.baseUrl).onChange(async (v) => {
         s.remote.baseUrl = v.trim();
         await this.save(true);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Bearer (device-local)").setDesc(
+    new import_obsidian7.Setting(containerEl).setName("Bearer (device-local)").setDesc(
       "ROOT key for the channel \u2014 a holder can run arbitrary ops against this vault. Stays on this device only (never synced, never committed). Must match the keystone's JARVIS_CMD_BEARER."
     ).addText((t) => {
       t.setPlaceholder("paste the device bearer").setValue(s.remote.bearer).onChange(async (v) => {
@@ -862,7 +1295,7 @@ var JarvisSettingTab = class extends import_obsidian5.PluginSettingTab {
       t.inputEl.autocomplete = "off";
       t.inputEl.setAttribute("spellcheck", "false");
     });
-    new import_obsidian5.Setting(containerEl).setName("Allow eval (danger)").setDesc(
+    new import_obsidian7.Setting(containerEl).setName("Allow eval (danger)").setDesc(
       "Let the channel run arbitrary pushed JavaScript with full vault access. Off unless you are actively debugging \u2014 this is remote code execution."
     ).addToggle(
       (t) => t.setValue(s.remote.allowEval).onChange(async (v) => {
@@ -870,14 +1303,14 @@ var JarvisSettingTab = class extends import_obsidian5.PluginSettingTab {
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Board (sessions)").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Daemon URL").setDesc("The sessions-daemon feeding the board. Tailnet-only.").addText(
+    new import_obsidian7.Setting(containerEl).setName("Board (sessions)").setHeading();
+    new import_obsidian7.Setting(containerEl).setName("Daemon URL").setDesc("The sessions-daemon feeding the board. Tailnet-only.").addText(
       (t) => t.setPlaceholder("http://mac-mini.tail1fd1c8.ts.net:8091").setValue(s.board.daemonUrl).onChange(async (v) => {
         s.board.daemonUrl = v.trim();
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Steer token").setDesc("Bearer for the daemon's steer endpoints. Only needed on a shell-less device.").addText((t) => {
+    new import_obsidian7.Setting(containerEl).setName("Steer token").setDesc("Bearer for the daemon's steer endpoints. Only needed on a shell-less device.").addText((t) => {
       t.setValue(s.board.steerToken).onChange(async (v) => {
         s.board.steerToken = v.trim();
         await this.save(false);
@@ -885,38 +1318,38 @@ var JarvisSettingTab = class extends import_obsidian5.PluginSettingTab {
       t.inputEl.type = "password";
       t.inputEl.autocomplete = "off";
     });
-    new import_obsidian5.Setting(containerEl).setName("Local fallback").setDesc("Run the zsh session engine directly when the daemon is unreachable (desktop only).").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Local fallback").setDesc("Run the zsh session engine directly when the daemon is unreachable (desktop only).").addToggle(
       (t) => t.setValue(s.board.localFallback).onChange(async (v) => {
         s.board.localFallback = v;
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Force web terminal").setDesc("Use the browser terminal on this desktop too, to exercise the mobile path.").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Force web terminal").setDesc("Use the browser terminal on this desktop too, to exercise the mobile path.").addToggle(
       (t) => t.setValue(s.board.forceWebTerm).onChange(async (v) => {
         s.board.forceWebTerm = v;
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Force daemon steer").setDesc("Steer through the daemon on this desktop too, to exercise the mobile path.").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Force daemon steer").setDesc("Steer through the daemon on this desktop too, to exercise the mobile path.").addToggle(
       (t) => t.setValue(s.board.forceDaemonSteer).onChange(async (v) => {
         s.board.forceDaemonSteer = v;
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Ask loop").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("Enable ask loop").setDesc("Poll po-broker for pending tap-cards and surface them.").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Ask loop").setHeading();
+    new import_obsidian7.Setting(containerEl).setName("Enable ask loop").setDesc("Poll po-broker for pending tap-cards and surface them.").addToggle(
       (t) => t.setValue(s.ask.askLoop).onChange(async (v) => {
         s.ask.askLoop = v;
         await this.save(false, true);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Broker URL").setDesc("po-broker base, e.g. https://mac-mini.tail1fd1c8.ts.net:7890/po").addText(
+    new import_obsidian7.Setting(containerEl).setName("Broker URL").setDesc("po-broker base, e.g. https://mac-mini.tail1fd1c8.ts.net:7890/po").addText(
       (t) => t.setPlaceholder("https://mac-mini.tail1fd1c8.ts.net:7890/po").setValue(s.ask.brokerUrl).onChange(async (v) => {
         s.ask.brokerUrl = v.trim();
         await this.save(false, true);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Poll interval (ms)").setDesc("How often to poll GET /po/pending. Default 2000.").addText(
+    new import_obsidian7.Setting(containerEl).setName("Poll interval (ms)").setDesc("How often to poll GET /po/pending. Default 2000.").addText(
       (t) => t.setValue(String(s.ask.askPollMs)).onChange(async (v) => {
         const n = Number(v);
         if (Number.isFinite(n) && n >= 250) {
@@ -925,20 +1358,20 @@ var JarvisSettingTab = class extends import_obsidian5.PluginSettingTab {
         }
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Terminal").setHeading();
-    new import_obsidian5.Setting(containerEl).setName("WebSocket URL").setDesc("ttyd/websocket terminal front, e.g. wss://mac-mini.tail1fd1c8.ts.net:7890").addText(
+    new import_obsidian7.Setting(containerEl).setName("Terminal").setHeading();
+    new import_obsidian7.Setting(containerEl).setName("WebSocket URL").setDesc("ttyd/websocket terminal front, e.g. wss://mac-mini.tail1fd1c8.ts.net:7890").addText(
       (t) => t.setPlaceholder("wss://mac-mini.tail1fd1c8.ts.net:7890").setValue(s.term.wsUrl).onChange(async (v) => {
         s.term.wsUrl = v.trim();
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Session label").setDesc("tmux session the terminal attaches to (`tmux new -A -s <label>`).").addText(
+    new import_obsidian7.Setting(containerEl).setName("Session label").setDesc("tmux session the terminal attaches to (`tmux new -A -s <label>`).").addText(
       (t) => t.setValue(s.term.sessionLabel).onChange(async (v) => {
         s.term.sessionLabel = v.trim();
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Auth token").setDesc("Bearer for the terminal websocket front.").addText((t) => {
+    new import_obsidian7.Setting(containerEl).setName("Auth token").setDesc("Bearer for the terminal websocket front.").addText((t) => {
       t.setValue(s.term.authToken).onChange(async (v) => {
         s.term.authToken = v.trim();
         await this.save(false);
@@ -946,25 +1379,25 @@ var JarvisSettingTab = class extends import_obsidian5.PluginSettingTab {
       t.inputEl.type = "password";
       t.inputEl.autocomplete = "off";
     });
-    new import_obsidian5.Setting(containerEl).setName("Canvas renderer").setDesc("xterm.js canvas renderer. Leave OFF on broken-GPU boxes (webgl blanks the pane).").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Canvas renderer").setDesc("xterm.js canvas renderer. Leave OFF on broken-GPU boxes (webgl blanks the pane).").addToggle(
       (t) => t.setValue(s.term.useCanvasRenderer).onChange(async (v) => {
         s.term.useCanvasRenderer = v;
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Show key bar").setDesc("On-screen key bar (iPad: Esc/Tab/Ctrl/arrows).").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Show key bar").setDesc("On-screen key bar (iPad: Esc/Tab/Ctrl/arrows).").addToggle(
       (t) => t.setValue(s.term.showKeyBar).onChange(async (v) => {
         s.term.showKeyBar = v;
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Copy on select").setDesc("Copy text to the clipboard the moment it is selected in the terminal.").addToggle(
+    new import_obsidian7.Setting(containerEl).setName("Copy on select").setDesc("Copy text to the clipboard the moment it is selected in the terminal.").addToggle(
       (t) => t.setValue(s.term.copyOnSelect).onChange(async (v) => {
         s.term.copyOnSelect = v;
         await this.save(false);
       })
     );
-    new import_obsidian5.Setting(containerEl).setName("Font size").setDesc("Terminal font size in px. Default 14.").addText(
+    new import_obsidian7.Setting(containerEl).setName("Font size").setDesc("Terminal font size in px. Default 14.").addText(
       (t) => t.setValue(String(s.term.fontSize)).onChange(async (v) => {
         const n = Number(v);
         if (Number.isFinite(n) && n >= 6 && n <= 48) {
@@ -985,7 +1418,7 @@ var LEGACY_PLUGIN_IDS = {
   pocket: "pocketoracle"
 };
 var BOARD_REFRESH_MS = 3e4;
-var JarvisBoardView = class extends import_obsidian6.ItemView {
+var JarvisBoardView = class extends import_obsidian8.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -1020,7 +1453,7 @@ var JarvisBoardView = class extends import_obsidian6.ItemView {
     }
     const url = base + "/projects";
     try {
-      const r = await (0, import_obsidian6.requestUrl)({ url, method: "GET", throw: false });
+      const r = await (0, import_obsidian8.requestUrl)({ url, method: "GET", throw: false });
       if (r.status !== 200) {
         this.status = "error";
         this.errorMsg = `Daemon returned ${r.status} at ${url}`;
@@ -1064,18 +1497,19 @@ var JarvisBoardView = class extends import_obsidian6.ItemView {
     }
     for (const card of this.cards) {
       renderCard(root, card, {
+        // Tapping a card opens the project DASHBOARD modal (the /ask ruling 2026-10-05),
+        // NOT the raw CONTINUE.md — the note is now a secondary button inside the modal.
         onPick: (c) => {
-          void this.plugin.app.workspace.openLinkText(
-            `01-Projects/${c.slug}/CONTINUE.md`,
-            "",
-            false
-          );
+          new DashboardModal(
+            { app: this.plugin.app, getSettings: () => this.plugin.settings },
+            c
+          ).open();
         }
       });
     }
   }
 };
-var JarvisSurfacePlugin = class extends import_obsidian6.Plugin {
+var JarvisSurfacePlugin = class extends import_obsidian8.Plugin {
   settings = DEFAULT_SETTINGS;
   /** The tailnet remote-control channel (deborah-remote port). Null until gated on. */
   remote = null;

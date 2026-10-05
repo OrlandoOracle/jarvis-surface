@@ -1,5 +1,6 @@
 import { ItemView, Plugin, requestUrl, type WorkspaceLeaf } from "obsidian";
 import { renderCard } from "./views/card";
+import { DashboardModal } from "./views/dashboard";
 import type { ProjectCard, ProjectsPayload } from "./views/types";
 import {
   DEFAULT_SETTINGS,
@@ -146,12 +147,13 @@ export class JarvisBoardView extends ItemView {
     // Ranked by the engine (live first, then updated) — render in order, never re-sort.
     for (const card of this.cards) {
       renderCard(root, card, {
+        // Tapping a card opens the project DASHBOARD modal (the /ask ruling 2026-10-05),
+        // NOT the raw CONTINUE.md — the note is now a secondary button inside the modal.
         onPick: (c) => {
-          void this.plugin.app.workspace.openLinkText(
-            `01-Projects/${c.slug}/CONTINUE.md`,
-            "",
-            false,
-          );
+          new DashboardModal(
+            { app: this.plugin.app, getSettings: () => this.plugin.settings },
+            c,
+          ).open();
         },
       });
     }

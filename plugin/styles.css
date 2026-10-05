@@ -696,3 +696,83 @@ body.is-mobile.po-term-fullscreen .workspace-tab-header-container {
   display: none !important;
 }
 
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * Project dashboard modal (DashboardModal) — what a board card opens on tap.
+ * Obsidian theme variables throughout so it reads correctly in light and dark.
+ * Reuses the cockpit-dot colours already defined above for the run-state badge.
+ * ───────────────────────────────────────────────────────────────────────── */
+.jarvis-dash .modal { max-width: 560px; }
+.jarvis-dash-content { padding: 2px 2px 8px; }
+.jarvis-dash-head { margin-bottom: 10px; }
+.jarvis-dash-brand {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text-accent); margin-bottom: 4px;
+}
+.jarvis-dash-titlerow {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;
+}
+.jarvis-dash-title { font-size: 20px; font-weight: 700; }
+.jarvis-dash-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; }
+.jarvis-dash-state { color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.jarvis-dash-host {
+  background: var(--background-modifier-border); color: var(--text-normal);
+  padding: 1px 6px; border-radius: 6px; font-size: 11px;
+}
+.jarvis-dash-monitor { color: var(--text-warning); font-size: 11px; }
+.jarvis-dash-status {
+  font-size: 14px; line-height: 1.5; color: var(--text-normal);
+  padding: 8px 10px; background: var(--background-secondary); border-radius: 8px; margin-bottom: 6px;
+}
+.jarvis-dash-next { margin-bottom: 12px; }
+.jarvis-dash-next-text { color: var(--text-accent); font-weight: 600; font-size: 13px; }
+.jarvis-dash-next-text--none { color: var(--text-faint); font-weight: 400; }
+
+.jarvis-dash-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+.jarvis-dash-steerrow { display: flex; gap: 8px; margin-bottom: 12px; }
+.jarvis-dash-steerinput {
+  flex: 1; min-width: 0; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--background-modifier-border); background: var(--background-primary);
+  color: var(--text-normal); font-size: 14px;
+}
+.jarvis-dash-btn {
+  min-height: 40px; padding: 8px 14px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--background-modifier-border); background: var(--interactive-normal);
+  color: var(--text-normal); font-size: 13px; font-weight: 600;
+}
+.jarvis-dash-btn:hover:not(:disabled) { background: var(--interactive-hover); }
+.jarvis-dash-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.jarvis-dash-btn--primary { background: var(--interactive-accent); color: var(--text-on-accent); border-color: transparent; }
+.jarvis-dash-btn--primary:hover:not(:disabled) { background: var(--interactive-accent-hover); }
+.jarvis-dash-btn--ghost { background: transparent; color: var(--text-muted); }
+
+.jarvis-dash-menu {
+  border: 1px solid var(--background-modifier-border); border-radius: 8px;
+  padding: 10px; margin-bottom: 12px; background: var(--background-secondary);
+}
+.jarvis-dash-menu-load, .jarvis-dash-menu-none { color: var(--text-muted); font-size: 13px; }
+.jarvis-dash-menu-err { color: var(--text-error); font-size: 13px; }
+.jarvis-dash-menu-q { font-weight: 600; margin-bottom: 8px; font-size: 14px; }
+.jarvis-dash-menu-opt {
+  display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+  min-height: 48px; padding: 8px 12px; margin-bottom: 6px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--background-modifier-border); background: var(--background-primary);
+  color: var(--text-normal); font-size: 14px;
+}
+.jarvis-dash-menu-opt:hover:not(:disabled) { background: var(--interactive-hover); }
+.jarvis-dash-menu-opt.is-choosing { outline: 2px solid var(--interactive-accent); }
+.jarvis-dash-menu-n {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 24px; height: 24px; border-radius: 50%; background: var(--interactive-accent);
+  color: var(--text-on-accent); font-weight: 700; font-size: 12px;
+}
+
+.jarvis-dash-sec { margin-top: 12px; }
+.jarvis-dash-sec-title {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-accent); margin-bottom: 4px;
+}
+.jarvis-dash-sec-list { margin: 0; padding-left: 18px; }
+.jarvis-dash-sec-list li { font-size: 13px; line-height: 1.5; color: var(--text-normal); margin-bottom: 2px; }
+.jarvis-dash-panel-text { font-size: 13px; line-height: 1.5; color: var(--text-normal); white-space: pre-wrap; }
+.jarvis-dash-foot { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--background-modifier-border); }

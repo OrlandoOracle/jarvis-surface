@@ -110,6 +110,57 @@ function proxyDaemon(subpath, res) {
   });
 }
 
+// Relay a request (any method) to the plain-HTTP daemon, forwarding the Authorization
+// bearer and a JSON body — the daemon's steering endpoints (/say, /choose, /interrupt)
+// are token-gated POSTs, and /menu is a token-gated GET. Same TLS-front rationale as
+// proxyDaemon: iOS ATS blocks cleartext, so the dashboard's steer client talks to the
+// keystone and the keystone talks cleartext to the loopback/tailnet daemon. The bearer
+// is NEVER stored here — it is the device's steerToken, passed straight through.
+function proxyDaemonReq(method, subpath, incoming, bodyBuf, res) {
+  const target = DAEMON + subpath;
+  const headers = {};
+  if (incoming.headers["authorization"]) headers["authorization"] = incoming.headers["authorization"];
+  if (bodyBuf && bodyBuf.length) {
+    headers["content-type"] = "application/json";
+    headers["content-length"] = Buffer.byteLength(bodyBuf);
+  }
+  const r = http.request(target, { method, headers, timeout: 8000 }, (dr) => {
+    let body = "";
+    dr.on("data", (c) => (body += c));
+    dr.on("end", () => {
+      res.writeHead(dr.statusCode || 502, {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+      });
+      res.end(body);
+    });
+  });
+  r.on("error", () => endJson(res, 502, { error: "daemon unreachable", target }));
+  r.on("timeout", () => {
+    r.destroy();
+    endJson(res, 504, { error: "daemon timeout", target });
+  });
+  if (bodyBuf && bodyBuf.length) r.write(bodyBuf);
+  r.end();
+}
+
+// Read the full request body as a Buffer, then hand it to `cb`. Caps at 64 KB — a steer
+// line or a choose index is tiny; anything larger is refused rather than buffered.
+function withBody(req, res, cb) {
+  const chunks = [];
+  let size = 0;
+  req.on("data", (c) => {
+    size += c.length;
+    if (size > 65536) {
+      req.destroy();
+      return;
+    }
+    chunks.push(c);
+  });
+  req.on("end", () => cb(Buffer.concat(chunks)));
+  req.on("error", () => endJson(res, 400, { error: "bad request body" }));
+}
+
 // Constant-time bearer check. Returns false when the channel is disabled (no key set)
 // or the presented bearer does not match — never leak which via timing.
 function bearerOk(presented) {
@@ -466,11 +517,25 @@ const server = http.createServer((req, res) => {
 
   // GET .../projects  (board feed — proxied from the plain-HTTP daemon over HTTPS)
   if (req.method === "GET" && /\/projects\/?$/.test(p)) {
+    console.log(`[board] /projects hit ua=${(req.headers["user-agent"] || "?").slice(0, 30)}`);
     return proxyDaemon("/projects" + (u.search || ""), res);
   }
   // GET .../sessions  (live sessions — same proxy, for a later view)
   if (req.method === "GET" && /\/sessions\/?$/.test(p)) {
     return proxyDaemon("/sessions" + (u.search || ""), res);
+  }
+
+  // GET .../menu?host=&pane=  (what the pane is asking — token-gated, forwarded through)
+  if (req.method === "GET" && /\/menu\/?$/.test(p)) {
+    return proxyDaemonReq("GET", "/menu" + (u.search || ""), req, null, res);
+  }
+  // POST .../say | /choose | /interrupt  (the dashboard's steering writes → daemon)
+  // Bearer-gated by the daemon; the keystone only forwards the Authorization header.
+  {
+    const steer = p.match(/\/(say|choose|interrupt)\/?$/);
+    if (req.method === "POST" && steer) {
+      return withBody(req, res, (buf) => proxyDaemonReq("POST", "/" + steer[1], req, buf, res));
+    }
   }
 
   // GET .../manifest.webmanifest  (PWA manifest)
