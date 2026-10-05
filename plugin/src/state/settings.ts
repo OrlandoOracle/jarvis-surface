@@ -150,6 +150,21 @@ function foldRemote(src: Bag, into: RemoteSettings): void {
   into.allowEval = bool(src.allowEval, into.allowEval);
 }
 
+/**
+ * Seed-only remote fold: carry forward ONLY the endpoint-agnostic prefs.
+ *
+ * The legacy deborah-remote `baseUrl` + `bearer` were a matched pair for the d2
+ * `todaystream` host, which left the mesh 2026-09-28. Seeding either forward would
+ * resurrect a dead endpoint (and a bearer that can't match the Mini keystone) on
+ * every cutover device — exactly what the #5 re-point killed. So the seed takes the
+ * NEW default baseUrl (Mini) and a blank bearer (set per-device in the settings tab),
+ * and only `remoteControl` / `allowEval` — which are endpoint-independent — survive.
+ */
+function foldRemoteSeed(src: Bag, into: RemoteSettings): void {
+  into.remoteControl = bool(src.remoteControl, into.remoteControl);
+  into.allowEval = bool(src.allowEval, into.allowEval);
+}
+
 /** Pull the five `board` keys out of a flat session-modal data.json. */
 function foldBoard(src: Bag, into: BoardSettings): void {
   into.forceWebTerm = bool(src.forceWebTerm, into.forceWebTerm);
@@ -236,7 +251,9 @@ export function seedFromLegacy(
   pocketData: unknown,
 ): JarvisSettings {
   const out = freshDefaults();
-  if (isObj(remoteData)) foldRemote(remoteData, out.remote);
+  // NB: foldRemoteSeed, not foldRemote — the dead-d2 baseUrl/bearer must not survive
+  // a cutover (see foldRemoteSeed). baseUrl stays the Mini default; bearer stays blank.
+  if (isObj(remoteData)) foldRemoteSeed(remoteData, out.remote);
   if (isObj(boardData)) foldBoard(boardData, out.board);
   if (isObj(pocketData)) foldPocket(pocketData, out.ask, out.term);
   return out;

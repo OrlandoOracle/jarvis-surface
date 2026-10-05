@@ -224,6 +224,10 @@ function foldRemote(src, into) {
   into.remoteControl = bool(src.remoteControl, into.remoteControl);
   into.allowEval = bool(src.allowEval, into.allowEval);
 }
+function foldRemoteSeed(src, into) {
+  into.remoteControl = bool(src.remoteControl, into.remoteControl);
+  into.allowEval = bool(src.allowEval, into.allowEval);
+}
 function foldBoard(src, into) {
   into.forceWebTerm = bool(src.forceWebTerm, into.forceWebTerm);
   into.daemonUrl = str(src.daemonUrl, into.daemonUrl);
@@ -271,7 +275,7 @@ function migrateSettings(raw) {
 }
 function seedFromLegacy(remoteData, boardData, pocketData) {
   const out = freshDefaults();
-  if (isObj(remoteData)) foldRemote(remoteData, out.remote);
+  if (isObj(remoteData)) foldRemoteSeed(remoteData, out.remote);
   if (isObj(boardData)) foldBoard(boardData, out.board);
   if (isObj(pocketData)) foldPocket(pocketData, out.ask, out.term);
   return out;
@@ -664,8 +668,8 @@ var JarvisSettingTab = class extends import_obsidian3.PluginSettingTab {
 // src/main.ts
 var VIEW_TYPE_BOARD = "jarvis-board";
 var LEGACY_PLUGIN_IDS = {
-  remote: "obsidian-deborah-remote",
-  board: "obsidian-session-modal",
+  remote: "deborah-remote",
+  board: "session-modal",
   pocket: "pocketoracle"
 };
 var JarvisBoardView = class extends import_obsidian4.ItemView {

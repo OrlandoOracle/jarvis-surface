@@ -16,10 +16,14 @@ export const VIEW_TYPE_BOARD = "jarvis-board";
  * The three legacy plugin ids whose flat `data.json` the cutover folds in. Order is
  * irrelevant (`seedFromLegacy` is key-presence based), but it is remote / board /
  * pocket so the tuple matches `seedFromLegacy(remote, board, pocket)` positionally.
+ *
+ * These are the INSTALLED plugin ids (the `.obsidian/plugins/<id>/` folder names,
+ * verified in the live vault), NOT the source-repo names — the repos are prefixed
+ * `obsidian-*` but each manifest's `id` drops the prefix.
  */
 const LEGACY_PLUGIN_IDS = {
-  remote: "obsidian-deborah-remote",
-  board: "obsidian-session-modal",
+  remote: "deborah-remote",
+  board: "session-modal",
   pocket: "pocketoracle",
 } as const;
 
