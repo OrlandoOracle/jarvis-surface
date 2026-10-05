@@ -127,13 +127,17 @@ ${obsBtn}
 </div>
 <script>
 var ID=${JSON.stringify(id)};
+// derive exact paths from the current URL so the tailscale-serve mount prefix
+// (/jarvis) is preserved and we never build /r/r/ double paths.
+var ACTION_URL=location.pathname.replace(/\/r\/[^/]+\/?$/,"/action");
+var SELF_URL=location.pathname;
 document.querySelectorAll("button.act").forEach(function(b){
   b.addEventListener("click",function(){
     var action=b.getAttribute("data-action");
     document.querySelectorAll("button.act").forEach(function(x){x.disabled=true});
-    fetch("action",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:ID,action:action})})
+    fetch(ACTION_URL,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:ID,action:action})})
       .then(function(r){return r.json()})
-      .then(function(){location.href="r/"+ID+"?tapped="+encodeURIComponent(action)})
+      .then(function(){location.href=SELF_URL+"?tapped="+encodeURIComponent(action)})
       .catch(function(){document.getElementById("msg").textContent="Network hiccup — tap again (Tailscale may have stalled).";document.querySelectorAll("button.act").forEach(function(x){x.disabled=false})});
   });
 });
