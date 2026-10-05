@@ -22,6 +22,10 @@ export interface DashboardDeps {
   app: App;
   /** Read LIVE — settings are replaced wholesale on a LiveSync write. */
   getSettings: () => JarvisSettings;
+  /** Open the in-plugin ttyd terminal view (Phase-1 #2). Optional so the modal
+   *  still works standalone; when absent the control falls back to the old
+   *  browser-tab / Notice behaviour. */
+  openTerminal?: () => void;
 }
 
 /** One extra panel from a project's `dashboard.yaml`. */
@@ -257,13 +261,21 @@ export class DashboardModal extends Modal {
   }
 
   private openTerminal(): void {
-    const term = this.deps.getSettings().term;
-    if (!term.wsUrl) {
-      new Notice("Terminal not configured (Settings → JARVIS Surface → Terminal). The ttyd view is a follow-on unit.");
+    // Phase-1 #2: the in-plugin ttyd view now owns this control on every device.
+    // It paints its own "configure me" message when term.wsUrl is unset, so the
+    // old pre-flight Notice is gone.
+    if (this.deps.openTerminal) {
+      this.close();
+      this.deps.openTerminal();
       return;
     }
-    // wss://host:7890/… → https://host:7890/ ; the browser terminal front lives at the
-    // same host. Opening in a new tab is honest until the in-plugin term view lands.
+    // Fallback for a standalone modal with no plugin callback wired: keep the
+    // honest browser-tab behaviour rather than silently no-op.
+    const term = this.deps.getSettings().term;
+    if (!term.wsUrl) {
+      new Notice("Terminal not configured (Settings → JARVIS Surface → Terminal).");
+      return;
+    }
     let httpUrl = term.wsUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:");
     try {
       const u = new URL(httpUrl);
@@ -272,7 +284,7 @@ export class DashboardModal extends Modal {
       /* leave as-is */
     }
     if (Platform.isMobile) {
-      new Notice(`Terminal: ${httpUrl} (in-plugin term view is a follow-on unit)`);
+      new Notice(`Terminal: ${httpUrl}`);
     } else {
       window.open(httpUrl, "_blank");
     }

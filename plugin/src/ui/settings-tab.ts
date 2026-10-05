@@ -29,10 +29,17 @@ export class JarvisSettingTab extends PluginSettingTab {
    * config at start, so without the restart a changed URL/bearer/cadence would not take
    * effect until an Obsidian reload.
    */
-  private async save(restartRemote = false, restartAsk = false): Promise<void> {
+  private async save(
+    restartRemote = false,
+    restartAsk = false,
+    refreshTerm = false,
+  ): Promise<void> {
     await this.plugin.saveSettings();
     if (restartRemote) this.plugin.restartRemote();
     if (restartAsk) this.plugin.restartAsk();
+    // Font/line-height/key-bar apply live to an open pane; wsUrl/token take effect
+    // on the next reopen (the socket snapshots them at connect).
+    if (refreshTerm) this.plugin.refreshTerminals();
   }
 
   override display(): void {
@@ -256,7 +263,7 @@ export class JarvisSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(s.term.showKeyBar).onChange(async (v) => {
           s.term.showKeyBar = v;
-          await this.save(false);
+          await this.save(false, false, true);
         }),
       );
 
@@ -278,7 +285,7 @@ export class JarvisSettingTab extends PluginSettingTab {
           const n = Number(v);
           if (Number.isFinite(n) && n >= 6 && n <= 48) {
             s.term.fontSize = n;
-            await this.save(false);
+            await this.save(false, false, true);
           }
         }),
       );

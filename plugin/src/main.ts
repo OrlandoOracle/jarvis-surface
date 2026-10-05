@@ -2,6 +2,7 @@ import { ItemView, Plugin, requestUrl, type WorkspaceLeaf } from "obsidian";
 import { renderCard } from "./views/card";
 import { DashboardModal } from "./views/dashboard";
 import { JarvisSessionsView, VIEW_TYPE_SESSIONS } from "./views/sessions";
+import { JarvisTerminalView, VIEW_TYPE_TERMINAL } from "./views/terminal";
 import type { ProjectCard, ProjectsPayload } from "./views/types";
 import {
   DEFAULT_SETTINGS,
@@ -152,7 +153,13 @@ export class JarvisBoardView extends ItemView {
         // NOT the raw CONTINUE.md — the note is now a secondary button inside the modal.
         onPick: (c) => {
           new DashboardModal(
-            { app: this.plugin.app, getSettings: () => this.plugin.settings },
+            {
+              app: this.plugin.app,
+              getSettings: () => this.plugin.settings,
+              // The dashboard's "open terminal" control now opens the in-plugin ttyd
+              // view (Phase-1 #2) instead of a browser tab / mobile Notice.
+              openTerminal: () => void this.plugin.openTerminal(),
+            },
             c,
           ).open();
         },
@@ -201,6 +208,12 @@ export default class JarvisSurfacePlugin extends Plugin {
           getSettings: () => this.settings,
         }),
     );
+    this.registerView(
+      VIEW_TYPE_TERMINAL,
+      // Live getter, not a snapshot: a LiveSync / settings-tab write replaces
+      // `this.settings` wholesale, and the view reads `.term` off it each time.
+      (leaf) => new JarvisTerminalView(leaf, () => this.settings.term),
+    );
 
     this.addRibbonIcon("layout-grid", "JARVIS board", () => {
       void this.openBoard();
@@ -217,6 +230,11 @@ export default class JarvisSurfacePlugin extends Plugin {
       id: "open-sessions",
       name: "Open the JARVIS session feed",
       callback: () => void this.openSessions(),
+    });
+    this.addCommand({
+      id: "open-terminal",
+      name: "Open the JARVIS terminal",
+      callback: () => void this.openTerminal(),
     });
 
     this.addSettingTab(new JarvisSettingTab(this.app, this));
@@ -290,6 +308,8 @@ export default class JarvisSurfacePlugin extends Plugin {
     this.restartRemote();
     // Same for the ask-loop: a device may have written a brokerUrl or toggled askLoop.
     this.restartAsk();
+    // A device may have changed term.* (font/keybar/wsUrl) — push into open panes.
+    this.refreshTerminals();
   }
 
   async saveSettings(): Promise<void> {
@@ -344,5 +364,29 @@ export default class JarvisSurfacePlugin extends Plugin {
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE_SESSIONS, active: true });
     await this.app.workspace.revealLeaf(leaf);
+  }
+
+  /**
+   * Open (or reveal) the in-plugin ttyd terminal — the Phase-1 #2 surface that
+   * replaces the browser-tab stub. One terminal leaf is reused; a fresh view that
+   * finds no `term.wsUrl` paints its own "configure me" message rather than spinning.
+   */
+  async openTerminal(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_TERMINAL);
+    if (existing.length) {
+      await this.app.workspace.revealLeaf(existing[0]!);
+      return;
+    }
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VIEW_TYPE_TERMINAL, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  /** Push live settings into any already-open terminal pane (font/keybar/etc.). */
+  refreshTerminals(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_TERMINAL)) {
+      const view = leaf.view;
+      if (view instanceof JarvisTerminalView) view.settingsChanged();
+    }
   }
 }
