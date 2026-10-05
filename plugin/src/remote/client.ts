@@ -1,18 +1,21 @@
-// Reverse-engineered from obsidian-deborah-remote/main.js (2026-08-30) — the SSE
-// connect/reconnect half of the remote-control channel (connectCmd / disconnectCmd /
-// scheduleCmdRetry / ack in the original). No .ts source ever existed.
+// The receive half of the remote-control channel.
 //
-// Transport mechanism only: the endpoint is driven ENTIRELY by RemoteSettings.baseUrl.
-// The legacy default pointed at d2's `todaystream`; d2 left the mesh 2026-09-28, so
-// NO literal endpoint lives here — re-pointing the channel (to the Mini keystone /
-// local-rest-api inbound) is a separate follow-on unit. With no baseUrl (or no
-// bearer) connect() no-ops cleanly: it does not throw and does not schedule a retry,
-// because there is nothing to reconnect to and a timer would be a busy loop.
+// Transport: LONG-POLL over Obsidian's native `requestUrl`, NOT EventSource. The
+// original (and the first port) used an SSE EventSource, which works in Electron but
+// NOT in Obsidian mobile's WKWebView — a cross-origin EventSource there never fires a
+// request (verified 2026-10-05 on the iPad: zero server contact while the same URL
+// loaded fine in iOS Chrome). `requestUrl` bypasses WKWebView's CORS entirely and
+// behaves identically on desktop and mobile, so it is the one transport that makes the
+// channel phone-first. The client polls GET /cmd/poll?after=<lastId>; the keystone
+// holds the request open until a newer command exists (or ~12s), then the client
+// dispatches each command and re-polls from the returned cursor.
+//
+// Endpoint is driven ENTIRELY by RemoteSettings.baseUrl (re-pointed to the Mini
+// keystone). With no baseUrl or no bearer the loop idles cleanly without hammering.
 //
 // Security: tailnet-only, bearer-gated. The bearer is a ROOT key (arbitrary JS + full
-// vault access via the dispatcher) — it lives device-local in data.json, is never
-// synced and never committed (RemoteSettings owns it). No live socket is opened at
-// build/test time; start() is only ever called from the plugin's onload gate.
+// vault access via the dispatcher) — device-local in data.json, never synced, never
+// committed. The loop is only ever started from the plugin's onload gate.
 
 import { Platform, requestUrl } from "obsidian";
 import type { RemoteSettings } from "../state/settings";
@@ -69,9 +72,10 @@ export interface RemoteClientDeps {
 }
 
 export class RemoteClient {
-  private es: EventSource | null = null;
-  private retry: ReturnType<typeof setTimeout> | null = null;
   private stopped = true;
+  private polling = false;
+  /** Last command id seen; null until the first sync poll establishes the cursor. */
+  private cursor: number | null = null;
   private readonly clientId: string;
   private readonly dispatcher: RemoteDispatcher;
 
@@ -89,69 +93,70 @@ export class RemoteClient {
   }
 
   start(): void {
+    if (this.polling) return; // one loop at a time; a restart stops then starts
     this.stopped = false;
-    this.connect();
+    this.cursor = null; // re-sync from "now" on every (re)start
+    void this.loop();
   }
 
   stop(): void {
     this.stopped = true;
-    this.disconnect();
+    // The in-flight requestUrl resolves on its own; the loop exits on the next check.
   }
 
-  private connect(): void {
-    this.disconnect();
-    if (this.stopped) return;
-    const s = this.deps.getSettings();
-    const base = trimBase(s.baseUrl);
-    const bearer = s.bearer;
-    // No endpoint or no key => clean no-op. Deliberately NO scheduleRetry(): there is
-    // nothing to reconnect to, and retrying would spin a timer forever.
-    if (!base || !bearer) return;
-    const url =
-      base +
-      "/cmd/stream?bearer=" +
-      encodeURIComponent(bearer) +
-      "&client=" +
-      encodeURIComponent(this.clientId);
+  private sleep(ms: number): Promise<void> {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  /**
+   * The long-poll loop. One request at a time: ask for anything after our cursor, the
+   * keystone holds it open until a command arrives (or ~12s), we dispatch each and
+   * re-poll from the returned cursor. `requestUrl` is used instead of fetch/EventSource
+   * because it is the only HTTP path that works in Obsidian mobile's WKWebView without
+   * tripping CORS. A 401/503/error backs off RETRY_MS rather than spinning.
+   */
+  private async loop(): Promise<void> {
+    this.polling = true;
     try {
-      this.es = new EventSource(url);
-    } catch {
-      this.scheduleRetry();
-      return;
-    }
-    this.es.onmessage = (e: MessageEvent) => {
-      let cmd: RemoteCommand;
-      try {
-        cmd = JSON.parse(e.data as string) as RemoteCommand;
-      } catch {
-        return;
+      while (!this.stopped) {
+        const s = this.deps.getSettings();
+        const base = trimBase(s.baseUrl);
+        const bearer = s.bearer;
+        if (!base || !bearer) {
+          await this.sleep(RETRY_MS); // not configured → idle, don't hammer
+          continue;
+        }
+        try {
+          const after = this.cursor;
+          const url =
+            base +
+            "/cmd/poll?bearer=" +
+            encodeURIComponent(bearer) +
+            "&client=" +
+            encodeURIComponent(this.clientId) +
+            (after != null ? "&after=" + after : "");
+          const r = await requestUrl({ url, method: "GET", throw: false });
+          if (r.status === 200) {
+            const body = (r.json ?? JSON.parse(r.text)) as {
+              cmds?: RemoteCommand[];
+              cursor?: number;
+            };
+            if (Array.isArray(body.cmds)) {
+              for (const cmd of body.cmds) await this.dispatcher.execute(cmd);
+            }
+            if (typeof body.cursor === "number") this.cursor = body.cursor;
+            // Clean 200 (held poll returned) → re-poll immediately, no backoff.
+          } else {
+            // 401/503 (bad/absent bearer, channel disabled) or other → back off.
+            await this.sleep(RETRY_MS);
+          }
+        } catch {
+          await this.sleep(RETRY_MS); // network error / client timeout → back off, re-poll
+        }
       }
-      void this.dispatcher.execute(cmd);
-    };
-    // EventSource auto-reconnects on a dropped socket; the guard is here so a thrown
-    // handler can never leave the error path unhandled.
-    this.es.onerror = () => {
-      /* EventSource auto-reconnects; nothing to do */
-    };
-  }
-
-  private disconnect(): void {
-    if (this.es) {
-      this.es.close();
-      this.es = null;
+    } finally {
+      this.polling = false;
     }
-    if (this.retry) {
-      clearTimeout(this.retry);
-      this.retry = null;
-    }
-  }
-
-  private scheduleRetry(): void {
-    if (this.retry || this.stopped) return;
-    this.retry = setTimeout(() => {
-      this.retry = null;
-      this.connect();
-    }, RETRY_MS);
   }
 
   /** POST a pushed op's result back to `/cmd/ack`. Best-effort: a failed ack is ignored. */

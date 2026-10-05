@@ -427,61 +427,62 @@ var RemoteClient = class {
       openStream: deps.openStream
     });
   }
-  es = null;
-  retry = null;
   stopped = true;
+  polling = false;
+  /** Last command id seen; null until the first sync poll establishes the cursor. */
+  cursor = null;
   clientId;
   dispatcher;
   start() {
+    if (this.polling) return;
     this.stopped = false;
-    this.connect();
+    this.cursor = null;
+    void this.loop();
   }
   stop() {
     this.stopped = true;
-    this.disconnect();
   }
-  connect() {
-    this.disconnect();
-    if (this.stopped) return;
-    const s = this.deps.getSettings();
-    const base = trimBase(s.baseUrl);
-    const bearer = s.bearer;
-    if (!base || !bearer) return;
-    const url = base + "/cmd/stream?bearer=" + encodeURIComponent(bearer) + "&client=" + encodeURIComponent(this.clientId);
+  sleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+  /**
+   * The long-poll loop. One request at a time: ask for anything after our cursor, the
+   * keystone holds it open until a command arrives (or ~12s), we dispatch each and
+   * re-poll from the returned cursor. `requestUrl` is used instead of fetch/EventSource
+   * because it is the only HTTP path that works in Obsidian mobile's WKWebView without
+   * tripping CORS. A 401/503/error backs off RETRY_MS rather than spinning.
+   */
+  async loop() {
+    this.polling = true;
     try {
-      this.es = new EventSource(url);
-    } catch {
-      this.scheduleRetry();
-      return;
-    }
-    this.es.onmessage = (e) => {
-      let cmd;
-      try {
-        cmd = JSON.parse(e.data);
-      } catch {
-        return;
+      while (!this.stopped) {
+        const s = this.deps.getSettings();
+        const base = trimBase(s.baseUrl);
+        const bearer = s.bearer;
+        if (!base || !bearer) {
+          await this.sleep(RETRY_MS);
+          continue;
+        }
+        try {
+          const after = this.cursor;
+          const url = base + "/cmd/poll?bearer=" + encodeURIComponent(bearer) + "&client=" + encodeURIComponent(this.clientId) + (after != null ? "&after=" + after : "");
+          const r = await (0, import_obsidian2.requestUrl)({ url, method: "GET", throw: false });
+          if (r.status === 200) {
+            const body = r.json ?? JSON.parse(r.text);
+            if (Array.isArray(body.cmds)) {
+              for (const cmd of body.cmds) await this.dispatcher.execute(cmd);
+            }
+            if (typeof body.cursor === "number") this.cursor = body.cursor;
+          } else {
+            await this.sleep(RETRY_MS);
+          }
+        } catch {
+          await this.sleep(RETRY_MS);
+        }
       }
-      void this.dispatcher.execute(cmd);
-    };
-    this.es.onerror = () => {
-    };
-  }
-  disconnect() {
-    if (this.es) {
-      this.es.close();
-      this.es = null;
+    } finally {
+      this.polling = false;
     }
-    if (this.retry) {
-      clearTimeout(this.retry);
-      this.retry = null;
-    }
-  }
-  scheduleRetry() {
-    if (this.retry || this.stopped) return;
-    this.retry = setTimeout(() => {
-      this.retry = null;
-      this.connect();
-    }, RETRY_MS);
   }
   /** POST a pushed op's result back to `/cmd/ack`. Best-effort: a failed ack is ignored. */
   async ack(id, ok, result) {

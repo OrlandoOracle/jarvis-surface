@@ -47,8 +47,39 @@ fs.mkdirSync(CMD_ACKS, { recursive: true });
 // committed and NEVER synced — it matches the plugin's device-local `bearer`. With no
 // key set the channel is DISABLED (503), mirroring the plugin no-op-without-bearer rule.
 const CMD_BEARER = process.env.JARVIS_CMD_BEARER || "";
-const cmdClients = new Set(); // live SSE res objects
+const cmdClients = new Set(); // live SSE res objects (desktop/curl; kept for debug)
 let cmdSeq = 0; // monotonic ack-correlation id the service stamps on each pushed cmd
+
+// Long-poll transport (the real one — works in Obsidian mobile's WKWebView, which does
+// NOT fire cross-origin EventSource). Commands land in a small ring buffer keyed by the
+// same monotonic id; a client polls GET /cmd/poll?after=<lastId> and the request is held
+// open until a newer command exists or HOLD_MS elapses. Cursor-based, so a client that
+// reconnects resumes after its last-seen id with no replay, and a command pushed while a
+// client is between polls is still caught (the SSE fan-out alone would drop it).
+const CMD_BUFFER = []; // [{id, op, ...}] recent commands, trimmed to CMD_BUFFER_MAX
+const CMD_BUFFER_MAX = 100;
+const cmdWaiters = new Set(); // {res, after, timer, who}
+const HOLD_MS = 12000; // under common HTTP-client timeouts so requestUrl doesn't abort first
+
+function endJson(res, code, obj) {
+  try {
+    res.writeHead(code, {
+      "content-type": "application/json; charset=utf-8",
+      "access-control-allow-origin": "*",
+    });
+    res.end(JSON.stringify(obj));
+  } catch {}
+}
+
+// Hand a waiting long-poll any commands newer than its cursor. Returns true if it fired.
+function deliverTo(w) {
+  const cmds = CMD_BUFFER.filter((c) => c.id > w.after);
+  if (!cmds.length) return false;
+  clearTimeout(w.timer);
+  cmdWaiters.delete(w);
+  endJson(w.res, 200, { cmds, cursor: cmds[cmds.length - 1].id });
+  return true;
+}
 
 // Constant-time bearer check. Returns false when the channel is disabled (no key set)
 // or the presented bearer does not match — never leak which via timing.
@@ -263,6 +294,15 @@ const server = http.createServer((req, res) => {
   // GET .../cmd/stream?bearer=&client=  (long-lived SSE command socket)
   if (req.method === "GET" && /\/cmd\/stream\/?$/.test(p)) {
     if (!bearerOk(u.searchParams.get("bearer"))) {
+      const who = u.searchParams.get("client") || "?";
+      const presented = u.searchParams.get("bearer") || "";
+      // Log the REJECT so a device that reaches us with a bad/empty bearer is
+      // distinguishable from one that never reaches us at all (a network/tailnet
+      // problem). Never log the key itself — only its length + a short fingerprint.
+      console.log(
+        `[cmd] stream REJECT client=${who} code=${CMD_BEARER ? 401 : 503} ` +
+          `presented_len=${presented.length} fp=${presented.slice(0, 4)}…${presented.slice(-2)}`,
+      );
       res.writeHead(CMD_BEARER ? 401 : 503, { "content-type": "text/plain" });
       return res.end(CMD_BEARER ? "unauthorized" : "command channel disabled (no bearer configured)");
     }
@@ -289,6 +329,42 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET .../cmd/poll?bearer=&client=&after=<id>  (long-poll — the mobile-safe transport)
+  if (req.method === "GET" && /\/cmd\/poll\/?$/.test(p)) {
+    if (!bearerOk(u.searchParams.get("bearer"))) {
+      const who = u.searchParams.get("client") || "?";
+      console.log(`[cmd] poll REJECT client=${who} code=${CMD_BEARER ? 401 : 503}`);
+      return endJson(res, CMD_BEARER ? 401 : 503, { ok: false });
+    }
+    const who = u.searchParams.get("client") || "?";
+    const afterRaw = u.searchParams.get("after");
+    // No cursor = a fresh client syncing: hand back the current id with NO replay, so it
+    // resumes from "now" and only sees commands pushed after it connected (SSE semantics).
+    if (afterRaw == null || afterRaw === "") {
+      console.log(`[cmd] poll SYNC   client=${who} -> cursor=${cmdSeq}`);
+      return endJson(res, 200, { cmds: [], cursor: cmdSeq });
+    }
+    const after = parseInt(afterRaw, 10) || 0;
+    const w = { res, after, timer: null, who };
+    // Immediate if the buffer already holds something newer than the client's cursor.
+    if (deliverTo(w)) {
+      console.log(`[cmd] poll HIT    client=${who} after=${after}`);
+      return;
+    }
+    // Otherwise hold the request open until a command arrives or HOLD_MS elapses.
+    w.timer = setTimeout(() => {
+      cmdWaiters.delete(w);
+      endJson(res, 200, { cmds: [], cursor: after });
+    }, HOLD_MS);
+    cmdWaiters.add(w);
+    console.log(`[cmd] poll WAIT   client=${who} after=${after} waiters=${cmdWaiters.size}`);
+    req.on("close", () => {
+      clearTimeout(w.timer);
+      cmdWaiters.delete(w);
+    });
+    return;
+  }
+
   // POST .../cmd/push {op,...}  (orchestrator enqueues a command → fan out to surfaces)
   if (req.method === "POST" && /\/cmd\/push\/?$/.test(p)) {
     if (!bearerOk(u.searchParams.get("bearer"))) {
@@ -307,13 +383,22 @@ const server = http.createServer((req, res) => {
       // The service stamps its own monotonic id over whatever was sent (the plugin's
       // dispatcher correlates its ack by this id), matching the original contract.
       cmd.id = ++cmdSeq;
+      // Buffer for the long-poll transport (trim to the last CMD_BUFFER_MAX).
+      CMD_BUFFER.push(cmd);
+      if (CMD_BUFFER.length > CMD_BUFFER_MAX) {
+        CMD_BUFFER.splice(0, CMD_BUFFER.length - CMD_BUFFER_MAX);
+      }
+      // Wake any held long-polls whose cursor is now behind.
+      let polled = 0;
+      for (const w of [...cmdWaiters]) if (deliverTo(w)) polled++;
+      // Fan out to any live SSE clients too (desktop/curl debug path).
       const line = `data: ${JSON.stringify(cmd)}\n\n`;
       let delivered = 0;
       for (const c of cmdClients) {
         try { c.write(line); delivered++; } catch {}
       }
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ ok: true, id: cmd.id, delivered }));
+      res.end(JSON.stringify({ ok: true, id: cmd.id, delivered: delivered + polled, sse: delivered, polled }));
     });
     return;
   }
@@ -413,7 +498,13 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({
       ok: true,
       svc: "jarvis-keystone",
-      cmd: { enabled: !!CMD_BEARER, clients: cmdClients.size, seq: cmdSeq },
+      cmd: {
+        enabled: !!CMD_BEARER,
+        clients: cmdClients.size, // live SSE sockets (debug path)
+        waiters: cmdWaiters.size, // held long-polls (the real transport)
+        buffered: CMD_BUFFER.length,
+        seq: cmdSeq,
+      },
     }));
   }
 

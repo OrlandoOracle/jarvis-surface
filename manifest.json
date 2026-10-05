@@ -1,9 +1,9 @@
 {
   "id": "jarvis-surface",
   "name": "JARVIS Surface",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "minAppVersion": "1.4.0",
-  "description": "The one unified JARVIS surface for Obsidian: project/session board, tailnet remote-control channel, and the tap-don't-type ask-loop — consolidating session-modal, deborah-remote and pocketoracle into a single thin-core plugin.",
+  "description": "The one unified JARVIS surface for Obsidian: project/session board, tailnet remote-control channel, and the tap-don't-type ask-loop \u2014 consolidating session-modal, deborah-remote and pocketoracle into a single thin-core plugin.",
   "author": "Sebastian Gerhardt / Deborah",
   "isDesktopOnly": false
 }
