@@ -1,7 +1,9 @@
 "use strict";
+var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
 var __export = (target, all) => {
   for (var name in all)
@@ -15,6 +17,14 @@ var __copyProps = (to, from, except, desc) => {
   }
   return to;
 };
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
 // src/main.ts
@@ -25,7 +35,7 @@ __export(main_exports, {
   default: () => JarvisSurfacePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/views/types.ts
 var LIVE_DOT = {
@@ -257,9 +267,235 @@ function migrateSettings(raw) {
   return out;
 }
 
+// src/remote/client.ts
+var import_obsidian2 = require("obsidian");
+
+// src/remote/dispatcher.ts
+var obsidian = __toESM(require("obsidian"), 1);
+var import_obsidian = require("obsidian");
+var ALLOWED_OPS = [
+  "hello",
+  "notice",
+  "open",
+  "openstream",
+  "mode",
+  "command",
+  "create",
+  "modify",
+  "append",
+  "delete"
+];
+var RemoteDispatcher = class {
+  constructor(deps) {
+    this.deps = deps;
+  }
+  fileByPath(path) {
+    const af = this.deps.app.vault.getAbstractFileByPath(path);
+    return af instanceof import_obsidian.TFile ? af : null;
+  }
+  // Flip the active markdown view between Reading (preview) and Source. Anything
+  // that is not "reading"/"preview" means Source, exactly as the original.
+  async setMode(mode) {
+    const view = this.deps.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+    if (!view) return;
+    const state = view.getState();
+    state.mode = mode === "reading" || mode === "preview" ? "preview" : "source";
+    await view.setState(state, { history: false });
+  }
+  async execute(cmd) {
+    if (!cmd || cmd.op === "hello") return;
+    const { app, ack } = this.deps;
+    if (cmd.op === "eval" && !this.deps.allowEval()) {
+      await ack(cmd.id, false, "refused: eval is fenced (Settings -> JARVIS surface -> Allow eval)");
+      new import_obsidian.Notice("JARVIS remote: refused a pushed eval (fenced)");
+      return;
+    }
+    if (cmd.op !== "eval" && !ALLOWED_OPS.includes(cmd.op)) {
+      await ack(cmd.id, false, "refused: op not in allow-list");
+      return;
+    }
+    try {
+      switch (cmd.op) {
+        case "notice":
+          new import_obsidian.Notice(String(cmd.msg ?? ""));
+          break;
+        case "open":
+          await app.workspace.openLinkText(cmd.path ?? "", "", !!cmd.newLeaf);
+          if (cmd.mode) await this.setMode(cmd.mode);
+          break;
+        case "openstream":
+          if (this.deps.openStream) await this.deps.openStream();
+          else new import_obsidian.Notice("JARVIS remote: stream view is not ported in this build");
+          break;
+        case "mode":
+          await this.setMode(cmd.mode);
+          break;
+        case "command": {
+          const cid = cmd.command_id;
+          if (!cid) throw new Error("command needs command_id");
+          const reg = app.commands;
+          if (!reg.executeCommandById(cid)) throw new Error("no such command: " + cid);
+          break;
+        }
+        case "create": {
+          const ex = this.fileByPath(cmd.path ?? "");
+          if (ex) await app.vault.modify(ex, cmd.content ?? "");
+          else await app.vault.create(cmd.path ?? "", cmd.content ?? "");
+          break;
+        }
+        case "modify": {
+          const f = this.fileByPath(cmd.path ?? "");
+          if (!f) throw new Error("no such file: " + cmd.path);
+          await app.vault.modify(f, cmd.content ?? "");
+          break;
+        }
+        case "append": {
+          let f = this.fileByPath(cmd.path ?? "");
+          if (!f) f = await app.vault.create(cmd.path ?? "", "");
+          await app.vault.append(f, cmd.text ?? "");
+          break;
+        }
+        case "delete": {
+          const f = this.fileByPath(cmd.path ?? "");
+          if (f) await app.vault.trash(f, true);
+          break;
+        }
+        case "eval": {
+          const fn = new Function(
+            "app",
+            "plugin",
+            "obsidian",
+            '"use strict";return (async()=>{' + (cmd.js ?? "") + "})()"
+          );
+          const out = await fn(app, this.deps.plugin, obsidian);
+          await ack(cmd.id, true, out);
+          return;
+        }
+        default:
+          throw new Error("unknown op: " + cmd.op);
+      }
+      await ack(cmd.id, true, "ok");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      await ack(cmd.id, false, msg);
+      new import_obsidian.Notice("JARVIS remote: " + msg);
+    }
+  }
+};
+
+// src/remote/client.ts
+function trimBase(u) {
+  return (u || "").replace(/\/+$/, "");
+}
+function genClientId() {
+  const P = import_obsidian2.Platform;
+  const kind = P.isIosApp ? "ios" : P.isAndroidApp ? "android" : P.isMacOS ? "mac" : P.isWin ? "win" : P.isLinux ? "linux" : P.isMobile ? "mobile" : "desktop";
+  let rand = "";
+  try {
+    const b = new Uint8Array(2);
+    crypto.getRandomValues(b);
+    rand = Array.from(b).map((x) => x.toString(16).padStart(2, "0")).join("");
+  } catch {
+    rand = Math.floor(Math.random() * 65536).toString(16).padStart(4, "0");
+  }
+  return kind + "-" + rand;
+}
+var RETRY_MS = 4e3;
+var RemoteClient = class {
+  constructor(deps) {
+    this.deps = deps;
+    this.clientId = genClientId();
+    this.dispatcher = new RemoteDispatcher({
+      app: deps.app,
+      plugin: deps.plugin,
+      allowEval: () => deps.getSettings().allowEval,
+      ack: (id, ok, result) => this.ack(id, ok, result),
+      openStream: deps.openStream
+    });
+  }
+  es = null;
+  retry = null;
+  stopped = true;
+  clientId;
+  dispatcher;
+  start() {
+    this.stopped = false;
+    this.connect();
+  }
+  stop() {
+    this.stopped = true;
+    this.disconnect();
+  }
+  connect() {
+    this.disconnect();
+    if (this.stopped) return;
+    const s = this.deps.getSettings();
+    const base = trimBase(s.baseUrl);
+    const bearer = s.bearer;
+    if (!base || !bearer) return;
+    const url = base + "/cmd/stream?bearer=" + encodeURIComponent(bearer) + "&client=" + encodeURIComponent(this.clientId);
+    try {
+      this.es = new EventSource(url);
+    } catch {
+      this.scheduleRetry();
+      return;
+    }
+    this.es.onmessage = (e) => {
+      let cmd;
+      try {
+        cmd = JSON.parse(e.data);
+      } catch {
+        return;
+      }
+      void this.dispatcher.execute(cmd);
+    };
+    this.es.onerror = () => {
+    };
+  }
+  disconnect() {
+    if (this.es) {
+      this.es.close();
+      this.es = null;
+    }
+    if (this.retry) {
+      clearTimeout(this.retry);
+      this.retry = null;
+    }
+  }
+  scheduleRetry() {
+    if (this.retry || this.stopped) return;
+    this.retry = setTimeout(() => {
+      this.retry = null;
+      this.connect();
+    }, RETRY_MS);
+  }
+  /** POST a pushed op's result back to `/cmd/ack`. Best-effort: a failed ack is ignored. */
+  async ack(id, ok, result) {
+    if (id == null) return;
+    const s = this.deps.getSettings();
+    const base = trimBase(s.baseUrl);
+    if (!base || !s.bearer) return;
+    try {
+      await (0, import_obsidian2.requestUrl)({
+        url: base + "/cmd/ack?bearer=" + encodeURIComponent(s.bearer),
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          id,
+          ok,
+          client: this.clientId,
+          result: result == null ? null : String(result).slice(0, 500)
+        }),
+        throw: false
+      });
+    } catch {
+    }
+  }
+};
+
 // src/main.ts
 var VIEW_TYPE_BOARD = "jarvis-board";
-var JarvisBoardView = class extends import_obsidian.ItemView {
+var JarvisBoardView = class extends import_obsidian3.ItemView {
   cards = [];
   constructor(leaf) {
     super(leaf);
@@ -295,8 +531,10 @@ var JarvisBoardView = class extends import_obsidian.ItemView {
     for (const card of this.cards) renderCard(root, card);
   }
 };
-var JarvisSurfacePlugin = class extends import_obsidian.Plugin {
+var JarvisSurfacePlugin = class extends import_obsidian3.Plugin {
   settings = DEFAULT_SETTINGS;
+  /** The tailnet remote-control channel (deborah-remote port). Null until gated on. */
+  remote = null;
   async onload() {
     const raw = await this.loadData();
     this.settings = migrateSettings(raw);
@@ -312,6 +550,21 @@ var JarvisSurfacePlugin = class extends import_obsidian.Plugin {
       name: "Open the JARVIS board",
       callback: () => void this.openBoard()
     });
+    const r = this.settings.remote;
+    if (r.remoteControl && r.baseUrl && r.bearer) {
+      this.remote = new RemoteClient({
+        app: this.app,
+        plugin: this,
+        getSettings: () => this.settings.remote,
+        // Closest surface available until the stream-view port lands.
+        openStream: () => this.openBoard()
+      });
+      this.remote.start();
+    }
+  }
+  onunload() {
+    this.remote?.stop();
+    this.remote = null;
   }
   /**
    * LiveSync replicates data.json across devices and will clobber it under a running

@@ -6,6 +6,7 @@ import {
   migrateSettings,
   type JarvisSettings,
 } from "./state/settings";
+import { RemoteClient } from "./remote/client";
 
 export const VIEW_TYPE_BOARD = "jarvis-board";
 
@@ -65,6 +66,9 @@ export class JarvisBoardView extends ItemView {
 export default class JarvisSurfacePlugin extends Plugin {
   override settings: JarvisSettings = DEFAULT_SETTINGS;
 
+  /** The tailnet remote-control channel (deborah-remote port). Null until gated on. */
+  private remote: RemoteClient | null = null;
+
   override async onload(): Promise<void> {
     // Versioned + total migration: whatever is on disk (v1, a legacy flat shape, or
     // a truncated write) becomes a complete v1 object. If migration actually changed
@@ -85,6 +89,27 @@ export default class JarvisSurfacePlugin extends Plugin {
       name: "Open the JARVIS board",
       callback: () => void this.openBoard(),
     });
+
+    // Remote-control channel: start ONLY when enabled AND fully configured. A missing
+    // baseUrl or bearer means the channel no-ops (the client itself guards too), so
+    // nothing connects on a fresh install. getSettings reads live so an external
+    // (LiveSync) settings write is picked up on the next connect/ack.
+    const r = this.settings.remote;
+    if (r.remoteControl && r.baseUrl && r.bearer) {
+      this.remote = new RemoteClient({
+        app: this.app,
+        plugin: this,
+        getSettings: () => this.settings.remote,
+        // Closest surface available until the stream-view port lands.
+        openStream: () => this.openBoard(),
+      });
+      this.remote.start();
+    }
+  }
+
+  override onunload(): void {
+    this.remote?.stop();
+    this.remote = null;
   }
 
   /**
