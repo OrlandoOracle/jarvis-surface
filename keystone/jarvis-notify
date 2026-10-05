@@ -1,0 +1,75 @@
+#!/usr/bin/env node
+/**
+ * jarvis-notify — emit a JARVIS work-done check-in.
+ *
+ *   jarvis-notify --title "..." --session "slug" --summary "md..." \
+ *                 [--actions "next:Start next phase,approve:Approve,close:Close out"] \
+ *                 [--obsidian "obsidian://adv-uri?vault=Deborah&filepath=..."] \
+ *                 [--no-text]
+ *
+ * Writes the payload to the jarvis-bus, then texts a TAPPABLE https tailnet link
+ * via deborah-say (link first + short, per the 1200-char SMS cap). Prints the id
+ * + URL. The orchestrator later reads the tap at
+ *   ~/Deborah/00-System/jarvis-bus/actions/<id>.json
+ */
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
+import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
+
+const HOST = "mac-mini.tail1fd1c8.ts.net";
+const BUS = path.join(os.homedir(), "Deborah/00-System/jarvis-bus");
+fs.mkdirSync(BUS, { recursive: true });
+
+function arg(name, def = null) {
+  const i = process.argv.indexOf(`--${name}`);
+  return i > -1 && process.argv[i + 1] ? process.argv[i + 1] : def;
+}
+const flag = (name) => process.argv.includes(`--${name}`);
+
+const title = arg("title", "Work done");
+const session = arg("session", "session");
+const summary = arg("summary", "_(no summary provided)_");
+const obsidian = arg("obsidian");
+const actionsRaw = arg("actions");
+const actions = actionsRaw
+  ? actionsRaw.split(",").map((pair) => {
+      const [id, ...rest] = pair.split(":");
+      return { id: id.trim(), label: rest.join(":").trim() || id.trim() };
+    })
+  : [
+      { id: "next", label: "Start next phase" },
+      { id: "approve", label: "Approve" },
+      { id: "close", label: "Close out session" },
+    ];
+
+const id = crypto.randomBytes(8).toString("hex");
+const payload = {
+  id,
+  title,
+  session,
+  summary_md: summary,
+  actions,
+  ...(obsidian ? { obsidian_uri: obsidian } : {}),
+  created: new Date().toISOString().replace("T", " ").slice(0, 16) + " UTC",
+};
+fs.writeFileSync(path.join(BUS, `${id}.json`), JSON.stringify(payload, null, 2));
+
+const url = `https://${HOST}/jarvis/r/${id}`;
+
+if (!flag("no-text")) {
+  // link FIRST + short — the relay truncates at 1200 chars.
+  const body = `${url}\n\n✓ ${title} — tap to review & steer.`;
+  try {
+    execFileSync(path.join(os.homedir(), ".local/bin/deborah-say"), [body], {
+      stdio: "inherit",
+    });
+    console.log(`texted + payload written`);
+  } catch (e) {
+    console.error(`deborah-say failed: ${e.message} (payload still written)`);
+  }
+}
+console.log(`id=${id}`);
+console.log(`url=${url}`);
+console.log(`tap=${path.join(BUS, "actions", id + ".json")}`);
