@@ -270,11 +270,22 @@ const server = http.createServer((req, res) => {
       "content-type": "text/event-stream; charset=utf-8",
       "cache-control": "no-cache, no-transform",
       connection: "keep-alive",
+      // The plugin's EventSource runs in Obsidian's renderer (origin app://obsidian.md),
+      // so this is a cross-origin request. Without ACAO, Chromium rejects the stream in
+      // milliseconds and — CORS failures being terminal — never reconnects. The channel
+      // is bearer-gated regardless of origin, so a wildcard here grants nothing extra.
+      "access-control-allow-origin": "*",
     });
     res.write("retry: 4000\n");
     res.write(": connected\n\n"); // open the stream immediately so EventSource fires onopen
     cmdClients.add(res);
-    req.on("close", () => cmdClients.delete(res));
+    const _t0 = Date.now();
+    const _who = u.searchParams.get("client") || "?";
+    console.log(`[cmd] stream CONNECT client=${_who} clients=${cmdClients.size}`);
+    req.on("close", () => {
+      cmdClients.delete(res);
+      console.log(`[cmd] stream CLOSE   client=${_who} dur=${Date.now() - _t0}ms clients=${cmdClients.size}`);
+    });
     return;
   }
 
