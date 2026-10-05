@@ -1,6 +1,7 @@
 import { ItemView, Plugin, requestUrl, type WorkspaceLeaf } from "obsidian";
 import { renderCard } from "./views/card";
 import { DashboardModal } from "./views/dashboard";
+import { JarvisSessionsView, VIEW_TYPE_SESSIONS } from "./views/sessions";
 import type { ProjectCard, ProjectsPayload } from "./views/types";
 import {
   DEFAULT_SETTINGS,
@@ -192,14 +193,30 @@ export default class JarvisSurfacePlugin extends Plugin {
     }
 
     this.registerView(VIEW_TYPE_BOARD, (leaf) => new JarvisBoardView(leaf, this));
+    this.registerView(
+      VIEW_TYPE_SESSIONS,
+      (leaf) =>
+        new JarvisSessionsView(leaf, {
+          app: this.app,
+          getSettings: () => this.settings,
+        }),
+    );
 
     this.addRibbonIcon("layout-grid", "JARVIS board", () => {
       void this.openBoard();
+    });
+    this.addRibbonIcon("terminal", "JARVIS sessions", () => {
+      void this.openSessions();
     });
     this.addCommand({
       id: "open-board",
       name: "Open the JARVIS board",
       callback: () => void this.openBoard(),
+    });
+    this.addCommand({
+      id: "open-sessions",
+      name: "Open the JARVIS session feed",
+      callback: () => void this.openSessions(),
     });
 
     this.addSettingTab(new JarvisSettingTab(this.app, this));
@@ -236,8 +253,8 @@ export default class JarvisSurfacePlugin extends Plugin {
       app: this.app,
       plugin: this,
       getSettings: () => this.settings.remote,
-      // Closest surface available until the stream-view port lands.
-      openStream: () => this.openBoard(),
+      // The `openstream` remote op surfaces the live session feed.
+      openStream: () => this.openSessions(),
     });
     this.remote.start();
   }
@@ -315,6 +332,17 @@ export default class JarvisSurfacePlugin extends Plugin {
     }
     const leaf = this.app.workspace.getLeaf("tab");
     await leaf.setViewState({ type: VIEW_TYPE_BOARD, active: true });
+    await this.app.workspace.revealLeaf(leaf);
+  }
+
+  async openSessions(): Promise<void> {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_SESSIONS);
+    if (existing.length) {
+      await this.app.workspace.revealLeaf(existing[0]!);
+      return;
+    }
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VIEW_TYPE_SESSIONS, active: true });
     await this.app.workspace.revealLeaf(leaf);
   }
 }
