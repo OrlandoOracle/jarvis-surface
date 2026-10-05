@@ -46,6 +46,13 @@ fs.mkdirSync(CMD_ACKS, { recursive: true });
 // Bearer-gated: the key is device-local on the Mini (env JARVIS_CMD_BEARER), NEVER
 // committed and NEVER synced — it matches the plugin's device-local `bearer`. With no
 // key set the channel is DISABLED (503), mirroring the plugin no-op-without-bearer rule.
+// The sessions-daemon the board reads. It binds the tailnet IP over PLAIN HTTP, which
+// iOS App Transport Security blocks from the Obsidian mobile `requestUrl` — so the board
+// cannot hit it directly on a phone/iPad. The keystone proxies it over its HTTPS 443
+// serve front (the one transport proven to reach iOS), so the board fetches
+// `{keystone}/projects` and never touches cleartext.
+const DAEMON = (process.env.JARVIS_DAEMON || "http://100.82.86.21:8091").replace(/\/+$/, "");
+
 const CMD_BEARER = process.env.JARVIS_CMD_BEARER || "";
 const cmdClients = new Set(); // live SSE res objects (desktop/curl; kept for debug)
 let cmdSeq = 0; // monotonic ack-correlation id the service stamps on each pushed cmd
@@ -79,6 +86,28 @@ function deliverTo(w) {
   cmdWaiters.delete(w);
   endJson(w.res, 200, { cmds, cursor: cmds[cmds.length - 1].id });
   return true;
+}
+
+// Relay a GET to the plain-HTTP sessions-daemon and return its JSON over this HTTPS
+// front (so iOS ATS never sees cleartext). Streams the body through untouched; adds CORS.
+function proxyDaemon(subpath, res) {
+  const target = DAEMON + subpath;
+  const r = http.get(target, { timeout: 8000 }, (dr) => {
+    let body = "";
+    dr.on("data", (c) => (body += c));
+    dr.on("end", () => {
+      res.writeHead(dr.statusCode || 502, {
+        "content-type": "application/json; charset=utf-8",
+        "access-control-allow-origin": "*",
+      });
+      res.end(body);
+    });
+  });
+  r.on("error", () => endJson(res, 502, { error: "daemon unreachable", target }));
+  r.on("timeout", () => {
+    r.destroy();
+    endJson(res, 504, { error: "daemon timeout", target });
+  });
 }
 
 // Constant-time bearer check. Returns false when the channel is disabled (no key set)
@@ -433,6 +462,15 @@ const server = http.createServer((req, res) => {
       res.end(JSON.stringify({ ok: true }));
     });
     return;
+  }
+
+  // GET .../projects  (board feed — proxied from the plain-HTTP daemon over HTTPS)
+  if (req.method === "GET" && /\/projects\/?$/.test(p)) {
+    return proxyDaemon("/projects" + (u.search || ""), res);
+  }
+  // GET .../sessions  (live sessions — same proxy, for a later view)
+  if (req.method === "GET" && /\/sessions\/?$/.test(p)) {
+    return proxyDaemon("/sessions" + (u.search || ""), res);
   }
 
   // GET .../manifest.webmanifest  (PWA manifest)

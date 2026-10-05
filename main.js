@@ -182,11 +182,11 @@ var DEFAULT_SETTINGS = {
     allowEval: false
   },
   board: {
-    // daemonUrl re-pointed off dead d2 (100.122.18.7) to the live Mini sessions-daemon,
-    // which binds the tailnet IP directly (100.82.86.21:8091) and is ACL-reachable from
-    // iOS (tag:desktop tcp:8091). Serves GET /projects -> ProjectsPayload.
+    // The board reads /projects from here. It points at the keystone's HTTPS 443 front
+    // (NOT the daemon's raw http://…:8091) because iOS ATS blocks cleartext HTTP from
+    // requestUrl — the keystone proxies the daemon over TLS so the board works on mobile.
     forceWebTerm: false,
-    daemonUrl: "http://100.82.86.21:8091",
+    daemonUrl: "https://mac-mini.tail1fd1c8.ts.net/jarvis",
     localFallback: true,
     steerToken: "",
     forceDaemonSteer: false
@@ -236,6 +236,13 @@ function foldBoard(src, into) {
   into.localFallback = bool(src.localFallback, into.localFallback);
   into.steerToken = str(src.steerToken, into.steerToken);
   into.forceDaemonSteer = bool(src.forceDaemonSteer, into.forceDaemonSteer);
+  normalizeDaemonUrl(into);
+}
+function normalizeDaemonUrl(into) {
+  const u = into.daemonUrl || "";
+  if (/:8091(\/|$)/.test(u) || /100\.122\.18\.7/.test(u) || u.startsWith("http://")) {
+    into.daemonUrl = DEFAULT_SETTINGS.board.daemonUrl;
+  }
 }
 function foldPocket(src, ask, term) {
   ask.askLoop = bool(src.askLoop, ask.askLoop);

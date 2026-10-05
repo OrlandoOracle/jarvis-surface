@@ -100,11 +100,11 @@ export const DEFAULT_SETTINGS: JarvisSettings = {
     allowEval: false,
   },
   board: {
-    // daemonUrl re-pointed off dead d2 (100.122.18.7) to the live Mini sessions-daemon,
-    // which binds the tailnet IP directly (100.82.86.21:8091) and is ACL-reachable from
-    // iOS (tag:desktop tcp:8091). Serves GET /projects -> ProjectsPayload.
+    // The board reads /projects from here. It points at the keystone's HTTPS 443 front
+    // (NOT the daemon's raw http://…:8091) because iOS ATS blocks cleartext HTTP from
+    // requestUrl — the keystone proxies the daemon over TLS so the board works on mobile.
     forceWebTerm: false,
-    daemonUrl: "http://100.82.86.21:8091",
+    daemonUrl: "https://mac-mini.tail1fd1c8.ts.net/jarvis",
     localFallback: true,
     steerToken: "",
     forceDaemonSteer: false,
@@ -174,6 +174,21 @@ function foldBoard(src: Bag, into: BoardSettings): void {
   into.localFallback = bool(src.localFallback, into.localFallback);
   into.steerToken = str(src.steerToken, into.steerToken);
   into.forceDaemonSteer = bool(src.forceDaemonSteer, into.forceDaemonSteer);
+  normalizeDaemonUrl(into);
+}
+
+/**
+ * Self-heal a stored daemonUrl that points straight at the raw daemon (any host on
+ * :8091) or at dead d2 — both are plain HTTP and so blocked by iOS ATS. Rewrite to the
+ * keystone HTTPS front, which proxies the daemon. This runs on every load, so devices
+ * carrying an older value fix themselves without a manual settings edit. A URL the user
+ * deliberately set to some other https host is left alone.
+ */
+function normalizeDaemonUrl(into: BoardSettings): void {
+  const u = into.daemonUrl || "";
+  if (/:8091(\/|$)/.test(u) || /100\.122\.18\.7/.test(u) || u.startsWith("http://")) {
+    into.daemonUrl = DEFAULT_SETTINGS.board.daemonUrl;
+  }
 }
 
 /** Split a flat pocketoracle data.json into the `ask` and `term` namespaces. */
