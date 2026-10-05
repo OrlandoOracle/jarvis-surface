@@ -68,8 +68,11 @@ export class DashboardModal extends Modal {
   }
 
   private steer(): SteerClient {
-    const b = this.deps.getSettings().board;
-    return new SteerClient(b.daemonUrl, b.steerToken);
+    const s = this.deps.getSettings();
+    // The steer client authenticates to the keystone with the CMD bearer (remote.bearer),
+    // NOT the raw daemon token — the keystone injects the daemon token server-side. This
+    // is what lets the iPad/phone steer with only the keystone key they already hold.
+    return new SteerClient(s.board.daemonUrl, s.remote.bearer);
   }
 
   override onOpen(): void {

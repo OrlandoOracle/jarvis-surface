@@ -243,11 +243,10 @@ var SteerClient = class {
   get configured() {
     return !!trimBase(this.base) && !!this.token;
   }
-  authHeaders() {
-    return {
-      Authorization: `Bearer ${this.token}`,
-      "Content-Type": "application/json"
-    };
+  /** The keystone bearer rides the query string (the keystone reads `?bearer=`), so a
+   *  POST only needs a JSON content-type header. */
+  bearerQuery() {
+    return "bearer=" + encodeURIComponent(this.token);
   }
   errFrom(status, text) {
     try {
@@ -264,12 +263,11 @@ var SteerClient = class {
     if (!this.configured) {
       return { kind: "error", status: 0, error: "steering not configured" };
     }
-    const url = trimBase(this.base) + "/menu?host=" + encodeURIComponent(host) + "&pane=" + encodeURIComponent(pane);
+    const url = trimBase(this.base) + "/menu?host=" + encodeURIComponent(host) + "&pane=" + encodeURIComponent(pane) + "&" + this.bearerQuery();
     try {
       const r = await (0, import_obsidian.requestUrl)({
         url,
         method: "GET",
-        headers: { Authorization: `Bearer ${this.token}` },
         throw: false
       });
       if (r.status !== 200) {
@@ -290,9 +288,9 @@ var SteerClient = class {
     }
     try {
       const r = await (0, import_obsidian.requestUrl)({
-        url: trimBase(this.base) + sub,
+        url: trimBase(this.base) + sub + "?" + this.bearerQuery(),
         method: "POST",
-        headers: this.authHeaders(),
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         throw: false
       });
@@ -358,8 +356,8 @@ var DashboardModal = class extends import_obsidian2.Modal {
     return this.card.slug;
   }
   steer() {
-    const b = this.deps.getSettings().board;
-    return new SteerClient(b.daemonUrl, b.steerToken);
+    const s = this.deps.getSettings();
+    return new SteerClient(s.board.daemonUrl, s.remote.bearer);
   }
   onOpen() {
     this.modalEl.addClass("jarvis-dash");

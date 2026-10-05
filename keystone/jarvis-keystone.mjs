@@ -54,6 +54,25 @@ fs.mkdirSync(CMD_ACKS, { recursive: true });
 const DAEMON = (process.env.JARVIS_DAEMON || "http://100.82.86.21:8091").replace(/\/+$/, "");
 
 const CMD_BEARER = process.env.JARVIS_CMD_BEARER || "";
+
+// Daemon steer token — held HERE so no client device ever needs the raw daemon key.
+// A dashboard steer request authenticates to THIS keystone with the cmd bearer
+// (JARVIS_CMD_BEARER — the same key the remote channel already uses); the keystone
+// validates that, then INJECTS this token as the Authorization when it proxies to the
+// daemon's /say /choose /interrupt /menu. Sourced from env, else parsed out of the
+// daemon's own env file on the Mini. Never logged, never returned to a client.
+function readSteerTokenFromEnvFile() {
+  try {
+    const f = path.join(os.homedir(), ".config/sessions-daemon.env");
+    const m = fs
+      .readFileSync(f, "utf8")
+      .match(/^\s*(?:export\s+)?SESSIONS_DAEMON_TOKEN=["']?([^"'\n]+)/m);
+    return m ? m[1] : "";
+  } catch {
+    return "";
+  }
+}
+const STEER_TOKEN = (process.env.JARVIS_STEER_TOKEN || readSteerTokenFromEnvFile() || "").trim();
 const cmdClients = new Set(); // live SSE res objects (desktop/curl; kept for debug)
 let cmdSeq = 0; // monotonic ack-correlation id the service stamps on each pushed cmd
 
@@ -116,10 +135,12 @@ function proxyDaemon(subpath, res) {
 // proxyDaemon: iOS ATS blocks cleartext, so the dashboard's steer client talks to the
 // keystone and the keystone talks cleartext to the loopback/tailnet daemon. The bearer
 // is NEVER stored here — it is the device's steerToken, passed straight through.
-function proxyDaemonReq(method, subpath, incoming, bodyBuf, res) {
+function proxyDaemonReq(method, subpath, daemonToken, bodyBuf, res) {
   const target = DAEMON + subpath;
   const headers = {};
-  if (incoming.headers["authorization"]) headers["authorization"] = incoming.headers["authorization"];
+  // The daemon token is injected HERE, from the keystone's own copy — it is never
+  // taken from the client request, so a device only ever presents the cmd bearer.
+  if (daemonToken) headers["authorization"] = "Bearer " + daemonToken;
   if (bodyBuf && bodyBuf.length) {
     headers["content-type"] = "application/json";
     headers["content-length"] = Buffer.byteLength(bodyBuf);
@@ -525,17 +546,26 @@ const server = http.createServer((req, res) => {
     return proxyDaemon("/sessions" + (u.search || ""), res);
   }
 
-  // GET .../menu?host=&pane=  (what the pane is asking — token-gated, forwarded through)
-  if (req.method === "GET" && /\/menu\/?$/.test(p)) {
-    return proxyDaemonReq("GET", "/menu" + (u.search || ""), req, null, res);
-  }
-  // POST .../say | /choose | /interrupt  (the dashboard's steering writes → daemon)
-  // Bearer-gated by the daemon; the keystone only forwards the Authorization header.
-  {
-    const steer = p.match(/\/(say|choose|interrupt)\/?$/);
-    if (req.method === "POST" && steer) {
-      return withBody(req, res, (buf) => proxyDaemonReq("POST", "/" + steer[1], req, buf, res));
+  // Steer routes — GET /menu, POST /say|/choose|/interrupt. The caller authenticates to
+  // the keystone with the CMD bearer (?bearer=, the key the remote channel already uses);
+  // the keystone validates it, then injects the daemon STEER_TOKEN when proxying. No
+  // client ever holds the raw daemon key. The bearer query param is harmless to the
+  // daemon (it reads host/pane) and is not logged here.
+  const isMenu = req.method === "GET" && /\/menu\/?$/.test(p);
+  const steerPost = req.method === "POST" ? p.match(/\/(say|choose|interrupt)\/?$/) : null;
+  if (isMenu || steerPost) {
+    if (!bearerOk(u.searchParams.get("bearer"))) {
+      return endJson(res, 401, { error: "bad or missing bearer" });
     }
+    if (!STEER_TOKEN) {
+      return endJson(res, 503, { error: "steer token not configured on keystone" });
+    }
+    if (isMenu) {
+      return proxyDaemonReq("GET", "/menu" + (u.search || ""), STEER_TOKEN, null, res);
+    }
+    return withBody(req, res, (buf) =>
+      proxyDaemonReq("POST", "/" + steerPost[1], STEER_TOKEN, buf, res),
+    );
   }
 
   // GET .../manifest.webmanifest  (PWA manifest)

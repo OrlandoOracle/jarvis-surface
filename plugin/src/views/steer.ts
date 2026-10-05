@@ -6,10 +6,14 @@
 //
 // Base URL is the SAME keystone HTTPS front the board reads (`board.daemonUrl`), never
 // the raw daemon on :8091 — iOS ATS blocks cleartext, so the keystone proxies these
-// routes over TLS (it strips the /jarvis mount, so it sees /say, /choose, …). Every
-// write carries `Authorization: Bearer <steerToken>`; the daemon refuses an unauthed
-// write with 401 and an unconfigured one with 503. The client never throws on an HTTP
-// error — it returns a tagged result so the modal can show the reason inline.
+// routes over TLS (it strips the /jarvis mount, so it sees /say, /choose, …).
+//
+// AUTH: the `token` here is the keystone CMD bearer (the device's `remote.bearer`), NOT
+// the raw daemon steer token. It travels as `?bearer=`; the keystone validates it and
+// then injects the daemon token server-side before proxying. This is why no device —
+// iPad or phone — ever needs the raw daemon key: it only presents the keystone bearer it
+// already holds for the remote channel. The client never throws on an HTTP error — it
+// returns a tagged result so the modal can show the reason inline.
 
 import { requestUrl } from "obsidian";
 
@@ -46,11 +50,10 @@ export class SteerClient {
     return !!trimBase(this.base) && !!this.token;
   }
 
-  private authHeaders(): Record<string, string> {
-    return {
-      Authorization: `Bearer ${this.token}`,
-      "Content-Type": "application/json",
-    };
+  /** The keystone bearer rides the query string (the keystone reads `?bearer=`), so a
+   *  POST only needs a JSON content-type header. */
+  private bearerQuery(): string {
+    return "bearer=" + encodeURIComponent(this.token);
   }
 
   private errFrom(status: number, text: string): string {
@@ -75,12 +78,13 @@ export class SteerClient {
       "/menu?host=" +
       encodeURIComponent(host) +
       "&pane=" +
-      encodeURIComponent(pane);
+      encodeURIComponent(pane) +
+      "&" +
+      this.bearerQuery();
     try {
       const r = await requestUrl({
         url,
         method: "GET",
-        headers: { Authorization: `Bearer ${this.token}` },
         throw: false,
       });
       if (r.status !== 200) {
@@ -106,9 +110,9 @@ export class SteerClient {
     }
     try {
       const r = await requestUrl({
-        url: trimBase(this.base) + sub,
+        url: trimBase(this.base) + sub + "?" + this.bearerQuery(),
         method: "POST",
-        headers: this.authHeaders(),
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
         throw: false,
       });
