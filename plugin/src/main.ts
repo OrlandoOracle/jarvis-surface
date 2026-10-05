@@ -1,6 +1,6 @@
-import { ItemView, Plugin, type WorkspaceLeaf } from "obsidian";
+import { ItemView, Plugin, requestUrl, type WorkspaceLeaf } from "obsidian";
 import { renderCard } from "./views/card";
-import type { ProjectCard } from "./views/types";
+import type { ProjectCard, ProjectsPayload } from "./views/types";
 import {
   DEFAULT_SETTINGS,
   migrateSettings,
@@ -27,19 +27,28 @@ const LEGACY_PLUGIN_IDS = {
   pocket: "pocketoracle",
 } as const;
 
+const BOARD_REFRESH_MS = 30000;
+
 /**
- * The project/session board leaf — the first ported surface of the unified plugin.
+ * The project/session board leaf — the live feed surface of the unified plugin.
  *
- * It owns the DOM and reuses the proven cockpit card renderer (`renderCard`). The
- * live feed, the daemon transport, and the spawn/steer wiring are deliberately NOT
- * ported in this unit (follow-on: session-modal feed + daemon + the local-rest-api
- * inbound routes). Until that lands the board renders whatever cards it has been
- * handed — an empty set on a fresh install — and says so, rather than faking data.
+ * It fetches the ranked `ProjectsPayload` from the Mini sessions-daemon
+ * (`board.daemonUrl` + `/projects`) over `requestUrl` — the same mobile-safe transport
+ * the remote channel uses, so the board works on the iPad/phone, not just desktop. The
+ * payload is pre-ranked by the engine (live first, then by `updated`); the renderer
+ * never re-sorts it. Cards reuse the proven cockpit `renderCard`. Tapping a card opens
+ * that project's CONTINUE.md. Spawn/steer/terminal controls stay a follow-on unit; this
+ * unit is the read + render feed.
  */
 export class JarvisBoardView extends ItemView {
   private cards: ProjectCard[] = [];
+  private status: "loading" | "ok" | "error" = "loading";
+  private errorMsg = "";
 
-  constructor(leaf: WorkspaceLeaf) {
+  constructor(
+    leaf: WorkspaceLeaf,
+    private readonly plugin: JarvisSurfacePlugin,
+  ) {
     super(leaf);
   }
 
@@ -55,28 +64,89 @@ export class JarvisBoardView extends ItemView {
     return "layout-grid";
   }
 
-  /** Hand the board a fresh set of cards (the feed port will call this). */
-  setCards(cards: ProjectCard[]): void {
-    this.cards = cards;
-    this.draw();
-  }
-
   override async onOpen(): Promise<void> {
     this.draw();
+    await this.refresh();
+    // Auto-refresh while the leaf is open; registerInterval clears it on close.
+    this.registerInterval(
+      window.setInterval(() => void this.refresh(), BOARD_REFRESH_MS),
+    );
+  }
+
+  /** Pull the ranked project feed from the daemon and redraw. */
+  private async refresh(): Promise<void> {
+    const base = this.plugin.settings.board.daemonUrl.replace(/\/+$/, "");
+    if (!base) {
+      this.status = "error";
+      this.errorMsg = "No daemon URL set (Settings → JARVIS Surface → Board).";
+      this.draw();
+      return;
+    }
+    const url = base + "/projects";
+    try {
+      const r = await requestUrl({ url, method: "GET", throw: false });
+      if (r.status !== 200) {
+        this.status = "error";
+        this.errorMsg = `Daemon returned ${r.status} at ${url}`;
+        this.draw();
+        return;
+      }
+      const payload = (r.json ?? JSON.parse(r.text)) as ProjectsPayload;
+      this.cards = Array.isArray(payload.projects) ? payload.projects : [];
+      this.status = "ok";
+      this.draw();
+    } catch {
+      this.status = "error";
+      this.errorMsg = `Daemon unreachable at ${url} — is Tailscale on?`;
+      this.draw();
+    }
   }
 
   private draw(): void {
     const root = this.contentEl;
     root.empty();
     root.addClass("jarvis-board");
-    if (this.cards.length === 0) {
-      root.createDiv({
-        cls: "cockpit-empty",
-        text: "No board feed yet — the session feed port is a follow-on unit.",
-      });
+
+    // Header: count + a manual refresh button.
+    const head = root.createDiv({ cls: "jarvis-board-head" });
+    const title =
+      this.status === "ok"
+        ? `${this.cards.length} project${this.cards.length === 1 ? "" : "s"}`
+        : this.status === "loading"
+          ? "Loading…"
+          : "Board";
+    head.createSpan({ cls: "jarvis-board-title", text: title });
+    const btn = head.createEl("button", {
+      cls: "jarvis-board-refresh",
+      text: "↻",
+      attr: { "aria-label": "Refresh" },
+    });
+    btn.addEventListener("click", () => void this.refresh());
+
+    if (this.status === "loading") {
+      root.createDiv({ cls: "cockpit-empty", text: "Loading the project feed…" });
       return;
     }
-    for (const card of this.cards) renderCard(root, card);
+    if (this.status === "error") {
+      root.createDiv({ cls: "cockpit-empty", text: this.errorMsg });
+      return;
+    }
+    if (this.cards.length === 0) {
+      root.createDiv({ cls: "cockpit-empty", text: "No projects on the board." });
+      return;
+    }
+    // Ranked by the engine (live first, then updated) — render in order, never re-sort.
+    for (const card of this.cards) {
+      renderCard(root, card, {
+        onPick: (c) => {
+          void this.plugin.app.workspace.openLinkText(
+            `01-Projects/${c.slug}/CONTINUE.md`,
+            "",
+            false,
+          );
+        },
+      });
+    }
   }
 }
 
@@ -108,7 +178,7 @@ export default class JarvisSurfacePlugin extends Plugin {
       this.settings = migrateSettings(raw);
     }
 
-    this.registerView(VIEW_TYPE_BOARD, (leaf) => new JarvisBoardView(leaf));
+    this.registerView(VIEW_TYPE_BOARD, (leaf) => new JarvisBoardView(leaf, this));
 
     this.addRibbonIcon("layout-grid", "JARVIS board", () => {
       void this.openBoard();

@@ -182,9 +182,11 @@ var DEFAULT_SETTINGS = {
     allowEval: false
   },
   board: {
-    // Verified from obsidian-session-modal/src/settings.ts DEFAULT_SETTINGS.
+    // daemonUrl re-pointed off dead d2 (100.122.18.7) to the live Mini sessions-daemon,
+    // which binds the tailnet IP directly (100.82.86.21:8091) and is ACL-reachable from
+    // iOS (tag:desktop tcp:8091). Serves GET /projects -> ProjectsPayload.
     forceWebTerm: false,
-    daemonUrl: "http://100.122.18.7:8091",
+    daemonUrl: "http://100.82.86.21:8091",
     localFallback: true,
     steerToken: "",
     forceDaemonSteer: false
@@ -673,11 +675,15 @@ var LEGACY_PLUGIN_IDS = {
   board: "session-modal",
   pocket: "pocketoracle"
 };
+var BOARD_REFRESH_MS = 3e4;
 var JarvisBoardView = class extends import_obsidian4.ItemView {
-  cards = [];
-  constructor(leaf) {
+  constructor(leaf, plugin) {
     super(leaf);
+    this.plugin = plugin;
   }
+  cards = [];
+  status = "loading";
+  errorMsg = "";
   getViewType() {
     return VIEW_TYPE_BOARD;
   }
@@ -687,26 +693,77 @@ var JarvisBoardView = class extends import_obsidian4.ItemView {
   getIcon() {
     return "layout-grid";
   }
-  /** Hand the board a fresh set of cards (the feed port will call this). */
-  setCards(cards) {
-    this.cards = cards;
-    this.draw();
-  }
   async onOpen() {
     this.draw();
+    await this.refresh();
+    this.registerInterval(
+      window.setInterval(() => void this.refresh(), BOARD_REFRESH_MS)
+    );
+  }
+  /** Pull the ranked project feed from the daemon and redraw. */
+  async refresh() {
+    const base = this.plugin.settings.board.daemonUrl.replace(/\/+$/, "");
+    if (!base) {
+      this.status = "error";
+      this.errorMsg = "No daemon URL set (Settings \u2192 JARVIS Surface \u2192 Board).";
+      this.draw();
+      return;
+    }
+    const url = base + "/projects";
+    try {
+      const r = await (0, import_obsidian4.requestUrl)({ url, method: "GET", throw: false });
+      if (r.status !== 200) {
+        this.status = "error";
+        this.errorMsg = `Daemon returned ${r.status} at ${url}`;
+        this.draw();
+        return;
+      }
+      const payload = r.json ?? JSON.parse(r.text);
+      this.cards = Array.isArray(payload.projects) ? payload.projects : [];
+      this.status = "ok";
+      this.draw();
+    } catch {
+      this.status = "error";
+      this.errorMsg = `Daemon unreachable at ${url} \u2014 is Tailscale on?`;
+      this.draw();
+    }
   }
   draw() {
     const root = this.contentEl;
     root.empty();
     root.addClass("jarvis-board");
-    if (this.cards.length === 0) {
-      root.createDiv({
-        cls: "cockpit-empty",
-        text: "No board feed yet \u2014 the session feed port is a follow-on unit."
-      });
+    const head = root.createDiv({ cls: "jarvis-board-head" });
+    const title = this.status === "ok" ? `${this.cards.length} project${this.cards.length === 1 ? "" : "s"}` : this.status === "loading" ? "Loading\u2026" : "Board";
+    head.createSpan({ cls: "jarvis-board-title", text: title });
+    const btn = head.createEl("button", {
+      cls: "jarvis-board-refresh",
+      text: "\u21BB",
+      attr: { "aria-label": "Refresh" }
+    });
+    btn.addEventListener("click", () => void this.refresh());
+    if (this.status === "loading") {
+      root.createDiv({ cls: "cockpit-empty", text: "Loading the project feed\u2026" });
       return;
     }
-    for (const card of this.cards) renderCard(root, card);
+    if (this.status === "error") {
+      root.createDiv({ cls: "cockpit-empty", text: this.errorMsg });
+      return;
+    }
+    if (this.cards.length === 0) {
+      root.createDiv({ cls: "cockpit-empty", text: "No projects on the board." });
+      return;
+    }
+    for (const card of this.cards) {
+      renderCard(root, card, {
+        onPick: (c) => {
+          void this.plugin.app.workspace.openLinkText(
+            `01-Projects/${c.slug}/CONTINUE.md`,
+            "",
+            false
+          );
+        }
+      });
+    }
   }
 };
 var JarvisSurfacePlugin = class extends import_obsidian4.Plugin {
@@ -723,7 +780,7 @@ var JarvisSurfacePlugin = class extends import_obsidian4.Plugin {
     } else {
       this.settings = migrateSettings(raw);
     }
-    this.registerView(VIEW_TYPE_BOARD, (leaf) => new JarvisBoardView(leaf));
+    this.registerView(VIEW_TYPE_BOARD, (leaf) => new JarvisBoardView(leaf, this));
     this.addRibbonIcon("layout-grid", "JARVIS board", () => {
       void this.openBoard();
     });

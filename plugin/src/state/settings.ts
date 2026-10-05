@@ -100,9 +100,11 @@ export const DEFAULT_SETTINGS: JarvisSettings = {
     allowEval: false,
   },
   board: {
-    // Verified from obsidian-session-modal/src/settings.ts DEFAULT_SETTINGS.
+    // daemonUrl re-pointed off dead d2 (100.122.18.7) to the live Mini sessions-daemon,
+    // which binds the tailnet IP directly (100.82.86.21:8091) and is ACL-reachable from
+    // iOS (tag:desktop tcp:8091). Serves GET /projects -> ProjectsPayload.
     forceWebTerm: false,
-    daemonUrl: "http://100.122.18.7:8091",
+    daemonUrl: "http://100.82.86.21:8091",
     localFallback: true,
     steerToken: "",
     forceDaemonSteer: false,

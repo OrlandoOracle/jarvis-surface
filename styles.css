@@ -273,3 +273,34 @@
 .cockpit-banner--offline .cockpit-banner-detail { opacity: 0.75; font-size: 11px; margin-top: 2px; }
 .cockpit-body--offline .cockpit-card { opacity: 0.55; }
 .cockpit-body--offline .cockpit-card-actions { display: none; }
+
+/* JARVIS board — live feed header (unit #1) */
+.jarvis-board-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  position: sticky;
+  top: 0;
+  background: var(--background-primary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  z-index: 1;
+}
+.jarvis-board-title {
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 0.85em;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.jarvis-board-refresh {
+  cursor: pointer;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-normal);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 1em;
+  line-height: 1;
+}
+.jarvis-board-refresh:active { transform: translateY(1px); }
