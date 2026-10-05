@@ -170,6 +170,7 @@
 .cockpit-host { border-radius: 3px; padding: 0 4px; background: var(--background-modifier-border); }
 .cockpit-tag { border-radius: 3px; padding: 0 4px; border: 1px solid var(--background-modifier-border); }
 .cockpit-tag--monitor { color: var(--text-faint); }
+.cockpit-tag--phi { color: var(--text-accent); border-color: var(--text-accent); font-weight: 600; }
 
 /* --- rail ---------------------------------------------------------------- */
 .rail-body { padding: 6px 6px 16px; font-size: 12px; }

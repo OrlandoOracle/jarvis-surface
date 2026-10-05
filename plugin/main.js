@@ -6287,6 +6287,7 @@ function renderCard(parent, card, opts = {}) {
       text: LIVE_DOT[live.status]
     });
     badge.createSpan({ cls: "cockpit-card-state", text: live.status });
+    if (live.phi) renderPhiTag(badge);
     badge.createSpan({
       cls: `cockpit-host cockpit-host--${live.host_key ?? "mac"}`,
       text: live.host_key ?? "?"
@@ -6375,6 +6376,9 @@ function addActions(parent, card, live, opts) {
     });
   }
   if (!actions.hasChildNodes()) actions.remove();
+}
+function renderPhiTag(badge) {
+  badge.createSpan({ cls: "cockpit-tag cockpit-tag--phi", text: "\u{1F512} phi" });
 }
 function isStaleAgo(ago) {
   return /^\d+d$/.test((ago ?? "").trim());

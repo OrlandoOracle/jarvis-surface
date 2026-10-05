@@ -57,6 +57,7 @@ export function renderCard(
       text: LIVE_DOT[live.status],
     });
     badge.createSpan({ cls: "cockpit-card-state", text: live.status });
+    if (live.phi) renderPhiTag(badge);
     badge.createSpan({
       cls: `cockpit-host cockpit-host--${live.host_key ?? "mac"}`,
       text: live.host_key ?? "?",
@@ -205,6 +206,7 @@ export function renderUnclaimed(
     text: LIVE_DOT[s.status],
   });
   badge.createSpan({ cls: "cockpit-card-state", text: s.status });
+  if (s.phi) renderPhiTag(badge);
   badge.createSpan({
     cls: `cockpit-host cockpit-host--${s.host_key ?? "mac"}`,
     text: s.host_key ?? "?",
@@ -212,6 +214,17 @@ export function renderUnclaimed(
   badge.createSpan({ cls: "cockpit-card-ago", text: agoLabel(s.ago_s) });
   el.createDiv({ cls: "cockpit-card-status", text: s.title || "—" });
   return el;
+}
+
+/**
+ * The PHI badge (Unit 1). A 🔒 glyph plus the word, so it reads for Sebastian whether
+ * or not the emoji renders. Says nothing ABOUT the PHI — it is the marker that this
+ * pane's work touches his book, which is the one thing the board needs to show. The
+ * fence that keeps values off the Anthropic path is enforced in the dispatch units
+ * (2–4), not here; this is only how a PHI session looks.
+ */
+function renderPhiTag(badge: HTMLElement): void {
+  badge.createSpan({ cls: "cockpit-tag cockpit-tag--phi", text: "🔒 phi" });
 }
 
 /**

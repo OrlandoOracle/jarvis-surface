@@ -135,6 +135,13 @@ export interface LiveSession {
   title: string;
   /** How `status` was decided: the hook beacon, or the capture-pane fallback. */
   source: "heartbeat" | "capture";
+  /**
+   * The session was spawned with the PHI flag (`JARVIS_PHI=1`) — a PHI-touching pane
+   * on the jarvis-phi-oracle surface. A bare routing boolean; it names no lead. The
+   * board renders a 🔒 badge so a PHI session is recognisable at a glance. Absent on
+   * beacons written before Unit 1 shipped, so treat undefined as not-PHI.
+   */
+  phi?: boolean;
 }
 
 export interface HostHealth {
