@@ -8,6 +8,7 @@ import {
   type JarvisSettings,
 } from "./state/settings";
 import { RemoteClient } from "./remote/client";
+import { JarvisSettingTab } from "./ui/settings-tab";
 
 export const VIEW_TYPE_BOARD = "jarvis-board";
 
@@ -114,26 +115,39 @@ export default class JarvisSurfacePlugin extends Plugin {
       callback: () => void this.openBoard(),
     });
 
-    // Remote-control channel: start ONLY when enabled AND fully configured. A missing
-    // baseUrl or bearer means the channel no-ops (the client itself guards too), so
-    // nothing connects on a fresh install. getSettings reads live so an external
-    // (LiveSync) settings write is picked up on the next connect/ack.
-    const r = this.settings.remote;
-    if (r.remoteControl && r.baseUrl && r.bearer) {
-      this.remote = new RemoteClient({
-        app: this.app,
-        plugin: this,
-        getSettings: () => this.settings.remote,
-        // Closest surface available until the stream-view port lands.
-        openStream: () => this.openBoard(),
-      });
-      this.remote.start();
-    }
+    this.addSettingTab(new JarvisSettingTab(this.app, this));
+
+    // Remote-control channel: start it off the current settings. restartRemote applies
+    // the enabled+configured gate itself, so a fresh install (no bearer) stays dark.
+    this.restartRemote();
   }
 
   override onunload(): void {
     this.remote?.stop();
     this.remote = null;
+  }
+
+  /**
+   * (Re)open the command-channel client from the LIVE settings. Called on load and
+   * whenever the settings tab changes a `remote.*` value — the socket snapshots
+   * baseUrl/bearer/remoteControl at connect time, so a changed bearer only takes
+   * effect once the old client is torn down and a new one connects. Starts a client
+   * ONLY when remote control is on AND both baseUrl and bearer are set; otherwise it
+   * leaves the channel dark (the client guards too, but not spinning one up is cleaner).
+   */
+  restartRemote(): void {
+    this.remote?.stop();
+    this.remote = null;
+    const r = this.settings.remote;
+    if (!(r.remoteControl && r.baseUrl && r.bearer)) return;
+    this.remote = new RemoteClient({
+      app: this.app,
+      plugin: this,
+      getSettings: () => this.settings.remote,
+      // Closest surface available until the stream-view port lands.
+      openStream: () => this.openBoard(),
+    });
+    this.remote.start();
   }
 
   /**
@@ -143,6 +157,9 @@ export default class JarvisSurfacePlugin extends Plugin {
    */
   override async onExternalSettingsChange(): Promise<void> {
     this.settings = migrateSettings(await this.loadData());
+    // A device wrote new remote config (e.g. a bearer). The open socket snapshotted the
+    // old values, so reconnect off the merged settings rather than trust the live copy.
+    this.restartRemote();
   }
 
   async saveSettings(): Promise<void> {
