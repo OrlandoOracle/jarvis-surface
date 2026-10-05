@@ -23,10 +23,16 @@ export class JarvisSettingTab extends PluginSettingTab {
     super(app, plugin);
   }
 
-  /** Persist, then (for remote keys) re-open the command socket off the new values. */
-  private async save(restartRemote = false): Promise<void> {
+  /**
+   * Persist, then re-arm the affected subsystem off the new values: the command socket
+   * (remote keys) and/or the ask-loop poller (ask keys). Each client snapshots its
+   * config at start, so without the restart a changed URL/bearer/cadence would not take
+   * effect until an Obsidian reload.
+   */
+  private async save(restartRemote = false, restartAsk = false): Promise<void> {
     await this.plugin.saveSettings();
     if (restartRemote) this.plugin.restartRemote();
+    if (restartAsk) this.plugin.restartAsk();
   }
 
   override display(): void {
@@ -166,7 +172,7 @@ export class JarvisSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(s.ask.askLoop).onChange(async (v) => {
           s.ask.askLoop = v;
-          await this.save(false);
+          await this.save(false, true);
         }),
       );
 
@@ -179,7 +185,7 @@ export class JarvisSettingTab extends PluginSettingTab {
           .setValue(s.ask.brokerUrl)
           .onChange(async (v) => {
             s.ask.brokerUrl = v.trim();
-            await this.save(false);
+            await this.save(false, true);
           }),
       );
 
@@ -191,7 +197,7 @@ export class JarvisSettingTab extends PluginSettingTab {
           const n = Number(v);
           if (Number.isFinite(n) && n >= 250) {
             s.ask.askPollMs = n;
-            await this.save(false);
+            await this.save(false, true);
           }
         }),
       );

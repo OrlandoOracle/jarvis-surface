@@ -35,7 +35,7 @@ __export(main_exports, {
   default: () => JarvisSurfacePlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian4 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/views/types.ts
 var LIVE_DOT = {
@@ -517,40 +517,341 @@ var RemoteClient = class {
   }
 };
 
-// src/ui/settings-tab.ts
+// src/ask/ask-loop.ts
+var import_obsidian4 = require("obsidian");
+
+// src/ask/ask-modal.ts
 var import_obsidian3 = require("obsidian");
-var JarvisSettingTab = class extends import_obsidian3.PluginSettingTab {
+var AskModal = class extends import_obsidian3.Modal {
+  qid;
+  questions;
+  settleFn;
+  done;
+  timer;
+  ttlMs;
+  /** Per-question current selection. Single: one label. Multi: a Set of labels. */
+  selection;
+  /** Per-question free-text value when the "Type…" path is used. */
+  typed;
+  submitBtn;
+  result;
+  // NB: every field is assigned here in the constructor body — NOT via class-field
+  // initializers. esbuild (target es2018) emitted the initializers as *native*
+  // class fields, and the iOS Obsidian WebView does not run subclass field
+  // initializers (AskModal extends Obsidian's Modal), leaving this.selection
+  // undefined → a blank modal on the iPad. Constructor assignment always runs.
+  constructor(app, qid, questions, ttlMs) {
+    super(app);
+    this.qid = qid;
+    this.questions = questions;
+    this.ttlMs = ttlMs;
+    this.done = false;
+    this.timer = null;
+    this.selection = /* @__PURE__ */ new Map();
+    this.typed = /* @__PURE__ */ new Map();
+    this.submitBtn = null;
+    this.result = new Promise((res) => this.settleFn = res);
+  }
+  finish(r) {
+    if (this.done) return;
+    this.done = true;
+    if (this.timer != null) window.clearTimeout(this.timer);
+    this.settleFn(r);
+    this.close();
+  }
+  /** Called by the loop when another device answered first, or it timed out. */
+  supersede(reason) {
+    this.finish(reason === "timeout" ? { kind: "timeout" } : { kind: "cancel" });
+  }
+  get singleFast() {
+    return this.questions.length === 1 && !this.questions[0].multiSelect;
+  }
+  buildAnswers() {
+    const out = {};
+    this.questions.forEach((q, i) => {
+      const t = this.typed.get(i);
+      if (t && t.trim()) {
+        out[q.question] = t.trim();
+        return;
+      }
+      const sel = this.selection.get(i);
+      if (sel && sel.size) out[q.question] = [...sel].join(", ");
+    });
+    return out;
+  }
+  everyAnswered() {
+    return this.questions.every((q, i) => {
+      const t = this.typed.get(i);
+      if (t && t.trim()) return true;
+      const sel = this.selection.get(i);
+      return !!sel && sel.size > 0;
+    });
+  }
+  refreshSubmit() {
+    if (this.submitBtn) this.submitBtn.disabled = !this.everyAnswered();
+  }
+  onOpen() {
+    const { contentEl, modalEl } = this;
+    this.selection = /* @__PURE__ */ new Map();
+    this.typed = /* @__PURE__ */ new Map();
+    modalEl.addClass("po-ask");
+    contentEl.empty();
+    contentEl.addClass("po-ask-content");
+    contentEl.createEl("div", { cls: "po-ask-brand", text: "\u25C6 Oracle \xB7 Claude is asking" });
+    const qs = this.questions;
+    if (!Array.isArray(qs) || qs.length === 0) {
+      contentEl.createEl("div", {
+        cls: "po-ask-error",
+        text: `no questions to render (got: ${Object.prototype.toString.call(qs)})`
+      });
+    }
+    try {
+      (Array.isArray(qs) ? qs : []).forEach((q, qi) => {
+        this.selection.set(qi, /* @__PURE__ */ new Set());
+        const section = contentEl.createDiv({ cls: "po-ask-q" });
+        if (q.header) section.createEl("div", { cls: "po-ask-header", text: q.header });
+        section.createEl("div", { cls: "po-ask-question", text: q.question });
+        const opts = section.createDiv({ cls: "po-ask-options" });
+        q.options.forEach((opt, oi) => {
+          const btn = opts.createEl("button", { cls: "po-ask-option" });
+          btn.style.setProperty("--i", String(oi));
+          btn.createEl("div", { cls: "po-ask-num", text: String(oi + 1) });
+          btn.createEl("div", { cls: "po-ask-option-label", text: opt.label });
+          if (opt.description) {
+            btn.createEl("div", { cls: "po-ask-option-desc", text: opt.description });
+          }
+          btn.createEl("div", { cls: "po-ask-check", text: "\u2713" });
+          btn.addEventListener("click", () => this.onOptionTap(qi, q, opt.label, btn, opts));
+        });
+        const typeRow = section.createDiv({ cls: "po-ask-typerow" });
+        const typeBtn = typeRow.createEl("button", {
+          cls: "po-ask-type",
+          text: "Type or dictate your own"
+        });
+        typeBtn.addEventListener("click", () => {
+          if (section.querySelector("textarea")) return;
+          const ta = section.createEl("textarea", { cls: "po-ask-textarea" });
+          ta.placeholder = "Type or dictate your answer\u2026";
+          let localSend = null;
+          if (this.singleFast) {
+            localSend = section.createEl("button", { cls: "po-ask-submit po-ask-send", text: "Send" });
+            localSend.disabled = true;
+            localSend.addEventListener("click", () => {
+              if (this.everyAnswered()) this.finish({ kind: "answered", answers: this.buildAnswers() });
+            });
+          }
+          ta.addEventListener("input", () => {
+            this.typed.set(qi, ta.value);
+            this.selection.get(qi)?.clear();
+            opts.querySelectorAll(".po-ask-option.is-selected").forEach(
+              (e) => e.removeClass("is-selected")
+            );
+            if (localSend) localSend.disabled = !ta.value.trim();
+            this.refreshSubmit();
+          });
+          ta.focus();
+        });
+      });
+    } catch (err) {
+      contentEl.createEl("div", {
+        cls: "po-ask-error",
+        text: `render error: ${err instanceof Error ? err.message : String(err)}`
+      });
+    }
+    const actions = contentEl.createDiv({ cls: "po-ask-actions" });
+    if (!this.singleFast) {
+      const submit = actions.createEl("button", { cls: "po-ask-submit", text: "Submit" });
+      submit.disabled = true;
+      submit.addEventListener("click", () => {
+        if (this.everyAnswered()) this.finish({ kind: "answered", answers: this.buildAnswers() });
+      });
+      this.submitBtn = submit;
+    }
+    const cancel = actions.createEl("button", { cls: "po-ask-cancel", text: "Cancel" });
+    cancel.addEventListener("click", () => this.finish({ kind: "cancel" }));
+    this.timer = window.setTimeout(() => this.finish({ kind: "timeout" }), this.ttlMs);
+  }
+  onOptionTap(qi, q, label, btn, opts) {
+    this.typed.delete(qi);
+    const sel = this.selection.get(qi);
+    if (q.multiSelect) {
+      if (sel.has(label)) {
+        sel.delete(label);
+        btn.removeClass("is-selected");
+      } else {
+        sel.add(label);
+        btn.addClass("is-selected");
+      }
+      this.refreshSubmit();
+      return;
+    }
+    sel.clear();
+    sel.add(label);
+    opts.querySelectorAll(".po-ask-option.is-selected").forEach((e) => e.removeClass("is-selected"));
+    btn.addClass("is-selected");
+    if (this.singleFast) {
+      this.flourish(btn);
+      window.setTimeout(() => this.finish({ kind: "answered", answers: this.buildAnswers() }), 240);
+    } else {
+      this.refreshSubmit();
+    }
+  }
+  /** Gold tap-confirm flourish: pop/flash the chosen card + a center ring-pulse
+   *  beat spawned on <body> (survives the modal close, self-removes). */
+  flourish(btn) {
+    btn.addClass("confirming");
+    const beat = document.body.createDiv({ cls: "po-ask-beat" });
+    window.setTimeout(() => beat.remove(), 500);
+  }
+  onClose() {
+    this.contentEl.empty();
+    this.finish({ kind: "cancel" });
+  }
+};
+
+// src/ask/ask-loop.ts
+var AskLoop = class {
+  app;
+  brokerBase;
+  // e.g. https://mac-mini.tail1fd1c8.ts.net:7890/po
+  ttlMs;
+  pollMs;
+  timer = null;
+  polling = false;
+  stopped = false;
+  modals = /* @__PURE__ */ new Map();
+  /**
+   * qids this device has already surfaced-and-closed (cancel/timeout). The ask
+   * may still be pending on the broker (another device could answer, or its TTL
+   * will expire it), but THIS device must not reopen it every poll — that was the
+   * modal-reopen loop. Pruned when the qid leaves /po/pending.
+   */
+  closed = /* @__PURE__ */ new Set();
+  onVisibility = () => {
+    if (document.visibilityState === "visible") void this.pollOnce();
+  };
+  constructor(app, brokerBase, opts) {
+    this.app = app;
+    this.brokerBase = brokerBase.replace(/\/$/, "");
+    this.ttlMs = opts.ttlMs;
+    this.pollMs = opts.pollMs;
+  }
+  start() {
+    if (this.timer != null) return;
+    this.stopped = false;
+    document.addEventListener("visibilitychange", this.onVisibility);
+    const tick = () => {
+      void this.pollOnce();
+      this.timer = window.setTimeout(tick, this.pollMs);
+    };
+    tick();
+  }
+  stop() {
+    this.stopped = true;
+    if (this.timer != null) window.clearTimeout(this.timer);
+    this.timer = null;
+    document.removeEventListener("visibilitychange", this.onVisibility);
+    for (const m of this.modals.values()) m.supersede("timeout");
+    this.modals.clear();
+  }
+  async pollOnce() {
+    if (this.polling || this.stopped) return;
+    this.polling = true;
+    try {
+      const res = await (0, import_obsidian4.requestUrl)({
+        url: `${this.brokerBase}/pending`,
+        method: "GET",
+        throw: false
+      });
+      if (res.status !== 200) return;
+      const pending = res.json?.pending ?? [];
+      const live = new Set(pending.map((p) => p.qid));
+      for (const [qid, modal] of [...this.modals]) {
+        if (!live.has(qid)) {
+          modal.supersede("timeout");
+          this.modals.delete(qid);
+        }
+      }
+      for (const qid of [...this.closed]) {
+        if (!live.has(qid)) this.closed.delete(qid);
+      }
+      for (const ask of pending) {
+        if (this.modals.has(ask.qid) || this.closed.has(ask.qid)) continue;
+        this.openModal(ask);
+      }
+    } catch {
+    } finally {
+      this.polling = false;
+    }
+  }
+  openModal(ask) {
+    const remaining = Math.max(5e3, Math.min(this.ttlMs, ask.exp - Date.now()));
+    const modal = new AskModal(this.app, ask.qid, ask.questions, remaining);
+    this.modals.set(ask.qid, modal);
+    modal.open();
+    void modal.result.then((r) => {
+      this.modals.delete(ask.qid);
+      if (r.kind === "answered") {
+        void this.postAnswer(ask.qid, r.answers);
+      } else {
+        this.closed.add(ask.qid);
+      }
+    });
+  }
+  async postAnswer(qid, answers) {
+    try {
+      await (0, import_obsidian4.requestUrl)({
+        url: `${this.brokerBase}/answer`,
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ qid, answers }),
+        throw: false
+      });
+    } catch {
+    }
+  }
+};
+
+// src/ui/settings-tab.ts
+var import_obsidian5 = require("obsidian");
+var JarvisSettingTab = class extends import_obsidian5.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
   }
-  /** Persist, then (for remote keys) re-open the command socket off the new values. */
-  async save(restartRemote = false) {
+  /**
+   * Persist, then re-arm the affected subsystem off the new values: the command socket
+   * (remote keys) and/or the ask-loop poller (ask keys). Each client snapshots its
+   * config at start, so without the restart a changed URL/bearer/cadence would not take
+   * effect until an Obsidian reload.
+   */
+  async save(restartRemote = false, restartAsk = false) {
     await this.plugin.saveSettings();
     if (restartRemote) this.plugin.restartRemote();
+    if (restartAsk) this.plugin.restartAsk();
   }
   display() {
     const { containerEl } = this;
     containerEl.empty();
     const s = this.plugin.settings;
-    new import_obsidian3.Setting(containerEl).setName("Remote command channel").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Remote command channel").setHeading();
     containerEl.createEl("p", {
       cls: "setting-item-description",
       text: "Tailnet-only, bearer-gated SSE channel. Deborah / the orchestrator pushes ops (open a note, run a command, append) and this device executes them. Nothing connects until both a base URL and a bearer are set."
     });
-    new import_obsidian3.Setting(containerEl).setName("Enable remote control").setDesc("Hold the command socket open and execute pushed ops.").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Enable remote control").setDesc("Hold the command socket open and execute pushed ops.").addToggle(
       (t) => t.setValue(s.remote.remoteControl).onChange(async (v) => {
         s.remote.remoteControl = v;
         await this.save(true);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Base URL").setDesc("The keystone inbound, e.g. https://mac-mini.tail1fd1c8.ts.net/jarvis").addText(
+    new import_obsidian5.Setting(containerEl).setName("Base URL").setDesc("The keystone inbound, e.g. https://mac-mini.tail1fd1c8.ts.net/jarvis").addText(
       (t) => t.setPlaceholder("https://mac-mini.tail1fd1c8.ts.net/jarvis").setValue(s.remote.baseUrl).onChange(async (v) => {
         s.remote.baseUrl = v.trim();
         await this.save(true);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Bearer (device-local)").setDesc(
+    new import_obsidian5.Setting(containerEl).setName("Bearer (device-local)").setDesc(
       "ROOT key for the channel \u2014 a holder can run arbitrary ops against this vault. Stays on this device only (never synced, never committed). Must match the keystone's JARVIS_CMD_BEARER."
     ).addText((t) => {
       t.setPlaceholder("paste the device bearer").setValue(s.remote.bearer).onChange(async (v) => {
@@ -561,7 +862,7 @@ var JarvisSettingTab = class extends import_obsidian3.PluginSettingTab {
       t.inputEl.autocomplete = "off";
       t.inputEl.setAttribute("spellcheck", "false");
     });
-    new import_obsidian3.Setting(containerEl).setName("Allow eval (danger)").setDesc(
+    new import_obsidian5.Setting(containerEl).setName("Allow eval (danger)").setDesc(
       "Let the channel run arbitrary pushed JavaScript with full vault access. Off unless you are actively debugging \u2014 this is remote code execution."
     ).addToggle(
       (t) => t.setValue(s.remote.allowEval).onChange(async (v) => {
@@ -569,14 +870,14 @@ var JarvisSettingTab = class extends import_obsidian3.PluginSettingTab {
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Board (sessions)").setHeading();
-    new import_obsidian3.Setting(containerEl).setName("Daemon URL").setDesc("The sessions-daemon feeding the board. Tailnet-only.").addText(
+    new import_obsidian5.Setting(containerEl).setName("Board (sessions)").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Daemon URL").setDesc("The sessions-daemon feeding the board. Tailnet-only.").addText(
       (t) => t.setPlaceholder("http://mac-mini.tail1fd1c8.ts.net:8091").setValue(s.board.daemonUrl).onChange(async (v) => {
         s.board.daemonUrl = v.trim();
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Steer token").setDesc("Bearer for the daemon's steer endpoints. Only needed on a shell-less device.").addText((t) => {
+    new import_obsidian5.Setting(containerEl).setName("Steer token").setDesc("Bearer for the daemon's steer endpoints. Only needed on a shell-less device.").addText((t) => {
       t.setValue(s.board.steerToken).onChange(async (v) => {
         s.board.steerToken = v.trim();
         await this.save(false);
@@ -584,60 +885,60 @@ var JarvisSettingTab = class extends import_obsidian3.PluginSettingTab {
       t.inputEl.type = "password";
       t.inputEl.autocomplete = "off";
     });
-    new import_obsidian3.Setting(containerEl).setName("Local fallback").setDesc("Run the zsh session engine directly when the daemon is unreachable (desktop only).").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Local fallback").setDesc("Run the zsh session engine directly when the daemon is unreachable (desktop only).").addToggle(
       (t) => t.setValue(s.board.localFallback).onChange(async (v) => {
         s.board.localFallback = v;
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Force web terminal").setDesc("Use the browser terminal on this desktop too, to exercise the mobile path.").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Force web terminal").setDesc("Use the browser terminal on this desktop too, to exercise the mobile path.").addToggle(
       (t) => t.setValue(s.board.forceWebTerm).onChange(async (v) => {
         s.board.forceWebTerm = v;
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Force daemon steer").setDesc("Steer through the daemon on this desktop too, to exercise the mobile path.").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Force daemon steer").setDesc("Steer through the daemon on this desktop too, to exercise the mobile path.").addToggle(
       (t) => t.setValue(s.board.forceDaemonSteer).onChange(async (v) => {
         s.board.forceDaemonSteer = v;
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Ask loop").setHeading();
-    new import_obsidian3.Setting(containerEl).setName("Enable ask loop").setDesc("Poll po-broker for pending tap-cards and surface them.").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Ask loop").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("Enable ask loop").setDesc("Poll po-broker for pending tap-cards and surface them.").addToggle(
       (t) => t.setValue(s.ask.askLoop).onChange(async (v) => {
         s.ask.askLoop = v;
-        await this.save(false);
+        await this.save(false, true);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Broker URL").setDesc("po-broker base, e.g. https://mac-mini.tail1fd1c8.ts.net:7890/po").addText(
+    new import_obsidian5.Setting(containerEl).setName("Broker URL").setDesc("po-broker base, e.g. https://mac-mini.tail1fd1c8.ts.net:7890/po").addText(
       (t) => t.setPlaceholder("https://mac-mini.tail1fd1c8.ts.net:7890/po").setValue(s.ask.brokerUrl).onChange(async (v) => {
         s.ask.brokerUrl = v.trim();
-        await this.save(false);
+        await this.save(false, true);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Poll interval (ms)").setDesc("How often to poll GET /po/pending. Default 2000.").addText(
+    new import_obsidian5.Setting(containerEl).setName("Poll interval (ms)").setDesc("How often to poll GET /po/pending. Default 2000.").addText(
       (t) => t.setValue(String(s.ask.askPollMs)).onChange(async (v) => {
         const n = Number(v);
         if (Number.isFinite(n) && n >= 250) {
           s.ask.askPollMs = n;
-          await this.save(false);
+          await this.save(false, true);
         }
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Terminal").setHeading();
-    new import_obsidian3.Setting(containerEl).setName("WebSocket URL").setDesc("ttyd/websocket terminal front, e.g. wss://mac-mini.tail1fd1c8.ts.net:7890").addText(
+    new import_obsidian5.Setting(containerEl).setName("Terminal").setHeading();
+    new import_obsidian5.Setting(containerEl).setName("WebSocket URL").setDesc("ttyd/websocket terminal front, e.g. wss://mac-mini.tail1fd1c8.ts.net:7890").addText(
       (t) => t.setPlaceholder("wss://mac-mini.tail1fd1c8.ts.net:7890").setValue(s.term.wsUrl).onChange(async (v) => {
         s.term.wsUrl = v.trim();
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Session label").setDesc("tmux session the terminal attaches to (`tmux new -A -s <label>`).").addText(
+    new import_obsidian5.Setting(containerEl).setName("Session label").setDesc("tmux session the terminal attaches to (`tmux new -A -s <label>`).").addText(
       (t) => t.setValue(s.term.sessionLabel).onChange(async (v) => {
         s.term.sessionLabel = v.trim();
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Auth token").setDesc("Bearer for the terminal websocket front.").addText((t) => {
+    new import_obsidian5.Setting(containerEl).setName("Auth token").setDesc("Bearer for the terminal websocket front.").addText((t) => {
       t.setValue(s.term.authToken).onChange(async (v) => {
         s.term.authToken = v.trim();
         await this.save(false);
@@ -645,25 +946,25 @@ var JarvisSettingTab = class extends import_obsidian3.PluginSettingTab {
       t.inputEl.type = "password";
       t.inputEl.autocomplete = "off";
     });
-    new import_obsidian3.Setting(containerEl).setName("Canvas renderer").setDesc("xterm.js canvas renderer. Leave OFF on broken-GPU boxes (webgl blanks the pane).").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Canvas renderer").setDesc("xterm.js canvas renderer. Leave OFF on broken-GPU boxes (webgl blanks the pane).").addToggle(
       (t) => t.setValue(s.term.useCanvasRenderer).onChange(async (v) => {
         s.term.useCanvasRenderer = v;
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Show key bar").setDesc("On-screen key bar (iPad: Esc/Tab/Ctrl/arrows).").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Show key bar").setDesc("On-screen key bar (iPad: Esc/Tab/Ctrl/arrows).").addToggle(
       (t) => t.setValue(s.term.showKeyBar).onChange(async (v) => {
         s.term.showKeyBar = v;
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Copy on select").setDesc("Copy text to the clipboard the moment it is selected in the terminal.").addToggle(
+    new import_obsidian5.Setting(containerEl).setName("Copy on select").setDesc("Copy text to the clipboard the moment it is selected in the terminal.").addToggle(
       (t) => t.setValue(s.term.copyOnSelect).onChange(async (v) => {
         s.term.copyOnSelect = v;
         await this.save(false);
       })
     );
-    new import_obsidian3.Setting(containerEl).setName("Font size").setDesc("Terminal font size in px. Default 14.").addText(
+    new import_obsidian5.Setting(containerEl).setName("Font size").setDesc("Terminal font size in px. Default 14.").addText(
       (t) => t.setValue(String(s.term.fontSize)).onChange(async (v) => {
         const n = Number(v);
         if (Number.isFinite(n) && n >= 6 && n <= 48) {
@@ -677,13 +978,14 @@ var JarvisSettingTab = class extends import_obsidian3.PluginSettingTab {
 
 // src/main.ts
 var VIEW_TYPE_BOARD = "jarvis-board";
+var ASK_MODAL_TTL_MS = 12e4;
 var LEGACY_PLUGIN_IDS = {
   remote: "deborah-remote",
   board: "session-modal",
   pocket: "pocketoracle"
 };
 var BOARD_REFRESH_MS = 3e4;
-var JarvisBoardView = class extends import_obsidian4.ItemView {
+var JarvisBoardView = class extends import_obsidian6.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.plugin = plugin;
@@ -718,7 +1020,7 @@ var JarvisBoardView = class extends import_obsidian4.ItemView {
     }
     const url = base + "/projects";
     try {
-      const r = await (0, import_obsidian4.requestUrl)({ url, method: "GET", throw: false });
+      const r = await (0, import_obsidian6.requestUrl)({ url, method: "GET", throw: false });
       if (r.status !== 200) {
         this.status = "error";
         this.errorMsg = `Daemon returned ${r.status} at ${url}`;
@@ -773,10 +1075,12 @@ var JarvisBoardView = class extends import_obsidian4.ItemView {
     }
   }
 };
-var JarvisSurfacePlugin = class extends import_obsidian4.Plugin {
+var JarvisSurfacePlugin = class extends import_obsidian6.Plugin {
   settings = DEFAULT_SETTINGS;
   /** The tailnet remote-control channel (deborah-remote port). Null until gated on. */
   remote = null;
+  /** The tap-don't-type ask-loop poller (pocketoracle port). Null until gated on. */
+  ask = null;
   async onload() {
     const raw = await this.loadData();
     const firstRun = !raw || raw.schemaVersion !== 1;
@@ -798,10 +1102,13 @@ var JarvisSurfacePlugin = class extends import_obsidian4.Plugin {
     });
     this.addSettingTab(new JarvisSettingTab(this.app, this));
     this.restartRemote();
+    this.restartAsk();
   }
   onunload() {
     this.remote?.stop();
     this.remote = null;
+    this.ask?.stop();
+    this.ask = null;
   }
   /**
    * (Re)open the command-channel client from the LIVE settings. Called on load and
@@ -826,6 +1133,24 @@ var JarvisSurfacePlugin = class extends import_obsidian4.Plugin {
     this.remote.start();
   }
   /**
+   * (Re)start the ask-loop poller from the LIVE settings. Called on load and whenever
+   * the settings tab changes an `ask.*` value. Starts a loop ONLY when the ask-loop is
+   * enabled AND a broker URL is set; otherwise it tears the loop down and leaves it
+   * dark. Mirrors restartRemote so a changed brokerUrl/cadence takes effect by
+   * teardown-and-recreate rather than mutating a running poller.
+   */
+  restartAsk() {
+    this.ask?.stop();
+    this.ask = null;
+    const a = this.settings.ask;
+    if (!(a.askLoop && a.brokerUrl)) return;
+    this.ask = new AskLoop(this.app, a.brokerUrl, {
+      ttlMs: ASK_MODAL_TTL_MS,
+      pollMs: a.askPollMs
+    });
+    this.ask.start();
+  }
+  /**
    * LiveSync replicates data.json across devices and will clobber it under a running
    * plugin. Obsidian calls this when the file changes on disk; re-migrate rather than
    * trust the in-memory copy, so a value another device wrote actually takes effect.
@@ -833,6 +1158,7 @@ var JarvisSurfacePlugin = class extends import_obsidian4.Plugin {
   async onExternalSettingsChange() {
     this.settings = migrateSettings(await this.loadData());
     this.restartRemote();
+    this.restartAsk();
   }
   async saveSettings() {
     await this.saveData(this.settings);

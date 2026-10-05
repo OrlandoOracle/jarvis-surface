@@ -8,9 +8,17 @@ import {
   type JarvisSettings,
 } from "./state/settings";
 import { RemoteClient } from "./remote/client";
+import { AskLoop } from "./ask/ask-loop";
 import { JarvisSettingTab } from "./ui/settings-tab";
 
 export const VIEW_TYPE_BOARD = "jarvis-board";
+
+/**
+ * Upper bound on how long an AskModal lingers before self-timing-out. The real TTL
+ * is the broker's per-ask `exp`, which openModal clamps to — this is only the ceiling
+ * for an ask whose exp is somehow further out. 2 min is generous for a tap.
+ */
+const ASK_MODAL_TTL_MS = 120_000;
 
 /**
  * The three legacy plugin ids whose flat `data.json` the cutover folds in. Order is
@@ -156,6 +164,9 @@ export default class JarvisSurfacePlugin extends Plugin {
   /** The tailnet remote-control channel (deborah-remote port). Null until gated on. */
   private remote: RemoteClient | null = null;
 
+  /** The tap-don't-type ask-loop poller (pocketoracle port). Null until gated on. */
+  private ask: AskLoop | null = null;
+
   override async onload(): Promise<void> {
     // Versioned + total migration: whatever is on disk (v1, a legacy flat shape, or
     // a truncated write) becomes a complete v1 object. If migration actually changed
@@ -194,11 +205,16 @@ export default class JarvisSurfacePlugin extends Plugin {
     // Remote-control channel: start it off the current settings. restartRemote applies
     // the enabled+configured gate itself, so a fresh install (no bearer) stays dark.
     this.restartRemote();
+    // Ask-loop poller: same pattern — restartAsk gates on askLoop + brokerUrl, so a
+    // fresh install (no broker URL) stays dark.
+    this.restartAsk();
   }
 
   override onunload(): void {
     this.remote?.stop();
     this.remote = null;
+    this.ask?.stop();
+    this.ask = null;
   }
 
   /**
@@ -225,6 +241,25 @@ export default class JarvisSurfacePlugin extends Plugin {
   }
 
   /**
+   * (Re)start the ask-loop poller from the LIVE settings. Called on load and whenever
+   * the settings tab changes an `ask.*` value. Starts a loop ONLY when the ask-loop is
+   * enabled AND a broker URL is set; otherwise it tears the loop down and leaves it
+   * dark. Mirrors restartRemote so a changed brokerUrl/cadence takes effect by
+   * teardown-and-recreate rather than mutating a running poller.
+   */
+  restartAsk(): void {
+    this.ask?.stop();
+    this.ask = null;
+    const a = this.settings.ask;
+    if (!(a.askLoop && a.brokerUrl)) return;
+    this.ask = new AskLoop(this.app, a.brokerUrl, {
+      ttlMs: ASK_MODAL_TTL_MS,
+      pollMs: a.askPollMs,
+    });
+    this.ask.start();
+  }
+
+  /**
    * LiveSync replicates data.json across devices and will clobber it under a running
    * plugin. Obsidian calls this when the file changes on disk; re-migrate rather than
    * trust the in-memory copy, so a value another device wrote actually takes effect.
@@ -234,6 +269,8 @@ export default class JarvisSurfacePlugin extends Plugin {
     // A device wrote new remote config (e.g. a bearer). The open socket snapshotted the
     // old values, so reconnect off the merged settings rather than trust the live copy.
     this.restartRemote();
+    // Same for the ask-loop: a device may have written a brokerUrl or toggled askLoop.
+    this.restartAsk();
   }
 
   async saveSettings(): Promise<void> {
