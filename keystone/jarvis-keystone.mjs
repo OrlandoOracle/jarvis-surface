@@ -26,13 +26,46 @@ import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 const PORT = 7920;
 const BUS = path.join(os.homedir(), "Deborah/00-System/jarvis-bus");
 const ACTIONS = path.join(BUS, "actions");
+const CMD_ACKS = path.join(BUS, "cmd-acks");
 const ICONDIR = path.dirname(fileURLToPath(import.meta.url)); // icon-*.png live beside this file
 fs.mkdirSync(ACTIONS, { recursive: true });
+fs.mkdirSync(CMD_ACKS, { recursive: true });
+
+// --- remote command channel ------------------------------------------------
+// The ported deborah-remote plugin (src/remote) connects a long-lived SSE socket to
+// /cmd/stream and POSTs results to /cmd/ack. An orchestrator enqueues a command with
+// POST /cmd/push {op,...}, which fans it out to every connected surface. This is the
+// Mini-side inbound that replaces the dead d2 `todaystream` the channel used to use.
+//
+// Bearer-gated: the key is device-local on the Mini (env JARVIS_CMD_BEARER), NEVER
+// committed and NEVER synced — it matches the plugin's device-local `bearer`. With no
+// key set the channel is DISABLED (503), mirroring the plugin no-op-without-bearer rule.
+const CMD_BEARER = process.env.JARVIS_CMD_BEARER || "";
+const cmdClients = new Set(); // live SSE res objects
+let cmdSeq = 0; // monotonic ack-correlation id the service stamps on each pushed cmd
+
+// Constant-time bearer check. Returns false when the channel is disabled (no key set)
+// or the presented bearer does not match — never leak which via timing.
+function bearerOk(presented) {
+  if (!CMD_BEARER) return false;
+  const a = Buffer.from(String(presented || ""));
+  const b = Buffer.from(CMD_BEARER);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// SSE keepalive: a comment line every 25s so `tailscale serve` / any proxy does not
+// drop an idle command socket. One shared timer walks the live-client set.
+setInterval(() => {
+  for (const res of cmdClients) {
+    try { res.write(": ping\n\n"); } catch {}
+  }
+}, 25000).unref();
 
 // `tailscale serve` STRIPS the /jarvis mount prefix before we see the request
 // (verified 2026-10-05: the service only ever sees /, /r/<id>, /manifest…), so
@@ -227,6 +260,85 @@ const server = http.createServer((req, res) => {
   const p = u.pathname;
   const mount = MOUNT; // external prefix for emitted URLs (serve strips it inbound)
 
+  // GET .../cmd/stream?bearer=&client=  (long-lived SSE command socket)
+  if (req.method === "GET" && /\/cmd\/stream\/?$/.test(p)) {
+    if (!bearerOk(u.searchParams.get("bearer"))) {
+      res.writeHead(CMD_BEARER ? 401 : 503, { "content-type": "text/plain" });
+      return res.end(CMD_BEARER ? "unauthorized" : "command channel disabled (no bearer configured)");
+    }
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+    });
+    res.write("retry: 4000\n");
+    res.write(": connected\n\n"); // open the stream immediately so EventSource fires onopen
+    cmdClients.add(res);
+    req.on("close", () => cmdClients.delete(res));
+    return;
+  }
+
+  // POST .../cmd/push {op,...}  (orchestrator enqueues a command → fan out to surfaces)
+  if (req.method === "POST" && /\/cmd\/push\/?$/.test(p)) {
+    if (!bearerOk(u.searchParams.get("bearer"))) {
+      res.writeHead(CMD_BEARER ? 401 : 503, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ ok: false }));
+    }
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      let cmd = {};
+      try { cmd = JSON.parse(body || "{}"); } catch {}
+      if (!cmd.op) {
+        res.writeHead(400, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ ok: false, error: "missing op" }));
+      }
+      // The service stamps its own monotonic id over whatever was sent (the plugin's
+      // dispatcher correlates its ack by this id), matching the original contract.
+      cmd.id = ++cmdSeq;
+      const line = `data: ${JSON.stringify(cmd)}\n\n`;
+      let delivered = 0;
+      for (const c of cmdClients) {
+        try { c.write(line); delivered++; } catch {}
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, id: cmd.id, delivered }));
+    });
+    return;
+  }
+
+  // POST .../cmd/ack?bearer=  {id, ok, client, result}  (a surface reports a result)
+  if (req.method === "POST" && /\/cmd\/ack\/?$/.test(p)) {
+    if (!bearerOk(u.searchParams.get("bearer"))) {
+      res.writeHead(CMD_BEARER ? 401 : 503, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ ok: false }));
+    }
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      let j = {};
+      try { j = JSON.parse(body || "{}"); } catch {}
+      if (j.id == null) {
+        res.writeHead(400, { "content-type": "application/json" });
+        return res.end(JSON.stringify({ ok: false }));
+      }
+      // Persist the ack so an orchestrator can poll the result, mirroring actions/.
+      const rec = {
+        id: String(j.id).slice(0, 40),
+        ok: !!j.ok,
+        client: String(j.client || "").slice(0, 40),
+        result: j.result == null ? null : String(j.result).slice(0, 500),
+        at: new Date().toISOString(),
+      };
+      if (/^[a-zA-Z0-9_-]+$/.test(rec.id)) {
+        fs.writeFileSync(path.join(CMD_ACKS, `${rec.id}.json`), JSON.stringify(rec, null, 2));
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    return;
+  }
+
   // GET .../manifest.webmanifest  (PWA manifest)
   if (req.method === "GET" && /\/manifest\.webmanifest$/.test(p)) {
     res.writeHead(200, { "content-type": "application/manifest+json; charset=utf-8" });
@@ -287,7 +399,11 @@ const server = http.createServer((req, res) => {
 
   if (req.method === "GET" && /\/health\/?$/.test(p)) {
     res.writeHead(200, { "content-type": "application/json" });
-    return res.end(JSON.stringify({ ok: true, svc: "jarvis-keystone" }));
+    return res.end(JSON.stringify({
+      ok: true,
+      svc: "jarvis-keystone",
+      cmd: { enabled: !!CMD_BEARER, clients: cmdClients.size, seq: cmdSeq },
+    }));
   }
 
   res.writeHead(404, { "content-type": "text/plain" });

@@ -4,11 +4,23 @@ import type { ProjectCard } from "./views/types";
 import {
   DEFAULT_SETTINGS,
   migrateSettings,
+  seedFromLegacy,
   type JarvisSettings,
 } from "./state/settings";
 import { RemoteClient } from "./remote/client";
 
 export const VIEW_TYPE_BOARD = "jarvis-board";
+
+/**
+ * The three legacy plugin ids whose flat `data.json` the cutover folds in. Order is
+ * irrelevant (`seedFromLegacy` is key-presence based), but it is remote / board /
+ * pocket so the tuple matches `seedFromLegacy(remote, board, pocket)` positionally.
+ */
+const LEGACY_PLUGIN_IDS = {
+  remote: "obsidian-deborah-remote",
+  board: "obsidian-session-modal",
+  pocket: "pocketoracle",
+} as const;
 
 /**
  * The project/session board leaf — the first ported surface of the unified plugin.
@@ -74,9 +86,21 @@ export default class JarvisSurfacePlugin extends Plugin {
     // a truncated write) becomes a complete v1 object. If migration actually changed
     // the shape, persist it once so the file on disk stops being legacy.
     const raw = await this.loadData();
-    this.settings = migrateSettings(raw);
-    if (!raw || (raw as { schemaVersion?: unknown }).schemaVersion !== 1) {
+    const firstRun = !raw || (raw as { schemaVersion?: unknown }).schemaVersion !== 1;
+    if (firstRun) {
+      // First-run cutover: the three legacy plugins each shipped their OWN flat
+      // data.json. If any are still on disk, seed from all three at once (richer than
+      // migrateSettings, which only sees this plugin's single file). Fall back to the
+      // single-file migration when no legacy data is found (genuine fresh install, or
+      // a partial/garbage write). Either way we persist once so the file stops being
+      // legacy and the next load is a clean v1.
+      const legacy = await this.loadLegacyData();
+      this.settings = legacy
+        ? seedFromLegacy(legacy.remote, legacy.board, legacy.pocket)
+        : migrateSettings(raw);
       await this.saveData(this.settings);
+    } else {
+      this.settings = migrateSettings(raw);
     }
 
     this.registerView(VIEW_TYPE_BOARD, (leaf) => new JarvisBoardView(leaf));
@@ -123,6 +147,34 @@ export default class JarvisSurfacePlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
+  }
+
+  /**
+   * Read the three legacy plugins' `data.json` straight off the vault adapter (they
+   * live at `<configDir>/plugins/<id>/data.json`). Returns the parsed bags, or null
+   * if NONE of the three exist — so the caller can tell a real cutover from a fresh
+   * install. A present-but-unparseable file reads as null for that slot;
+   * `seedFromLegacy` treats a null slot as "take defaults".
+   */
+  private async loadLegacyData(): Promise<
+    { remote: unknown; board: unknown; pocket: unknown } | null
+  > {
+    const read = async (id: string): Promise<unknown> => {
+      const p = `${this.app.vault.configDir}/plugins/${id}/data.json`;
+      try {
+        if (!(await this.app.vault.adapter.exists(p))) return null;
+        return JSON.parse(await this.app.vault.adapter.read(p));
+      } catch {
+        return null;
+      }
+    };
+    const [remote, board, pocket] = await Promise.all([
+      read(LEGACY_PLUGIN_IDS.remote),
+      read(LEGACY_PLUGIN_IDS.board),
+      read(LEGACY_PLUGIN_IDS.pocket),
+    ]);
+    if (remote == null && board == null && pocket == null) return null;
+    return { remote, board, pocket };
   }
 
   async openBoard(): Promise<void> {

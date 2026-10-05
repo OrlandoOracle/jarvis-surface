@@ -23,7 +23,11 @@ export const SCHEMA_VERSION = 1 as const;
 
 /** deborah-remote (⚠ compiled-only source — values verified from main.js DEFAULTS). */
 export interface RemoteSettings {
-  /** todaystream base URL on d2. Tailnet-only, bearer-gated. */
+  /**
+   * Command-channel base URL. The client hits `{baseUrl}/cmd/stream` (SSE) and
+   * `{baseUrl}/cmd/ack` (POST). Tailnet-only, bearer-gated. Re-pointed off the dead
+   * d2 `todaystream` (left the mesh 2026-09-28) to the Mini keystone `/jarvis` inbound.
+   */
   baseUrl: string;
   /** Root key for the command channel. Device-local, never synced, never committed. */
   bearer: string;
@@ -86,8 +90,11 @@ export interface JarvisSettings {
 export const DEFAULT_SETTINGS: JarvisSettings = {
   schemaVersion: SCHEMA_VERSION,
   remote: {
-    // Verified from obsidian-deborah-remote/main.js DEFAULTS.
-    baseUrl: "https://deborah-2.tail1fd1c8.ts.net/todaystream",
+    // Re-pointed off the dead d2 `todaystream` to the Mini keystone `/jarvis` inbound
+    // (d2 left the mesh 2026-09-28). The keystone serves /cmd/stream + /cmd/ack behind
+    // `tailscale serve --set-path /jarvis`. No connection opens until a bearer is set
+    // (device-local, never synced), so a fresh install still no-ops cleanly.
+    baseUrl: "https://mac-mini.tail1fd1c8.ts.net/jarvis",
     bearer: "",
     remoteControl: true,
     allowEval: false,

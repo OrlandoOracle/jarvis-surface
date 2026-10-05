@@ -172,8 +172,11 @@ var SCHEMA_VERSION = 1;
 var DEFAULT_SETTINGS = {
   schemaVersion: SCHEMA_VERSION,
   remote: {
-    // Verified from obsidian-deborah-remote/main.js DEFAULTS.
-    baseUrl: "https://deborah-2.tail1fd1c8.ts.net/todaystream",
+    // Re-pointed off the dead d2 `todaystream` to the Mini keystone `/jarvis` inbound
+    // (d2 left the mesh 2026-09-28). The keystone serves /cmd/stream + /cmd/ack behind
+    // `tailscale serve --set-path /jarvis`. No connection opens until a bearer is set
+    // (device-local, never synced), so a fresh install still no-ops cleanly.
+    baseUrl: "https://mac-mini.tail1fd1c8.ts.net/jarvis",
     bearer: "",
     remoteControl: true,
     allowEval: false
@@ -264,6 +267,13 @@ function migrateSettings(raw) {
   foldRemote(raw, out.remote);
   foldBoard(raw, out.board);
   foldPocket(raw, out.ask, out.term);
+  return out;
+}
+function seedFromLegacy(remoteData, boardData, pocketData) {
+  const out = freshDefaults();
+  if (isObj(remoteData)) foldRemote(remoteData, out.remote);
+  if (isObj(boardData)) foldBoard(boardData, out.board);
+  if (isObj(pocketData)) foldPocket(pocketData, out.ask, out.term);
   return out;
 }
 
@@ -495,6 +505,11 @@ var RemoteClient = class {
 
 // src/main.ts
 var VIEW_TYPE_BOARD = "jarvis-board";
+var LEGACY_PLUGIN_IDS = {
+  remote: "obsidian-deborah-remote",
+  board: "obsidian-session-modal",
+  pocket: "pocketoracle"
+};
 var JarvisBoardView = class extends import_obsidian3.ItemView {
   cards = [];
   constructor(leaf) {
@@ -537,9 +552,13 @@ var JarvisSurfacePlugin = class extends import_obsidian3.Plugin {
   remote = null;
   async onload() {
     const raw = await this.loadData();
-    this.settings = migrateSettings(raw);
-    if (!raw || raw.schemaVersion !== 1) {
+    const firstRun = !raw || raw.schemaVersion !== 1;
+    if (firstRun) {
+      const legacy = await this.loadLegacyData();
+      this.settings = legacy ? seedFromLegacy(legacy.remote, legacy.board, legacy.pocket) : migrateSettings(raw);
       await this.saveData(this.settings);
+    } else {
+      this.settings = migrateSettings(raw);
     }
     this.registerView(VIEW_TYPE_BOARD, (leaf) => new JarvisBoardView(leaf));
     this.addRibbonIcon("layout-grid", "JARVIS board", () => {
@@ -576,6 +595,31 @@ var JarvisSurfacePlugin = class extends import_obsidian3.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+  }
+  /**
+   * Read the three legacy plugins' `data.json` straight off the vault adapter (they
+   * live at `<configDir>/plugins/<id>/data.json`). Returns the parsed bags, or null
+   * if NONE of the three exist — so the caller can tell a real cutover from a fresh
+   * install. A present-but-unparseable file reads as null for that slot;
+   * `seedFromLegacy` treats a null slot as "take defaults".
+   */
+  async loadLegacyData() {
+    const read = async (id) => {
+      const p = `${this.app.vault.configDir}/plugins/${id}/data.json`;
+      try {
+        if (!await this.app.vault.adapter.exists(p)) return null;
+        return JSON.parse(await this.app.vault.adapter.read(p));
+      } catch {
+        return null;
+      }
+    };
+    const [remote, board, pocket] = await Promise.all([
+      read(LEGACY_PLUGIN_IDS.remote),
+      read(LEGACY_PLUGIN_IDS.board),
+      read(LEGACY_PLUGIN_IDS.pocket)
+    ]);
+    if (remote == null && board == null && pocket == null) return null;
+    return { remote, board, pocket };
   }
   async openBoard() {
     const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_BOARD);
