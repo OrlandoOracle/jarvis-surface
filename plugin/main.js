@@ -464,7 +464,7 @@ var DashboardModal = class extends import_obsidian2.Modal {
   }
   drawControls(parent, live) {
     const injectable = !!live?.injectable;
-    const host = live?.host ?? "";
+    const host = live?.host_key ?? live?.host ?? "";
     const pane = live?.pane ?? "";
     const wrap = parent.createDiv({ cls: "jarvis-dash-controls" });
     const resume = wrap.createEl("button", { cls: "jarvis-dash-btn jarvis-dash-btn--primary" });

@@ -204,7 +204,11 @@ export class DashboardModal extends Modal {
 
   private drawControls(parent: HTMLElement, live: ProjectCard["live"]): void {
     const injectable = !!live?.injectable;
-    const host = live?.host ?? "";
+    // The daemon's steering resolves a host KEY ("mini"/"mac"/"d1"/"d2"), not the raw
+    // `socket.gethostname()` — passing `live.host` ("Sebastians-Mac-mini.local") makes it
+    // treat the local pane as an unknown/remote host and try (and fail) to ssh. `host_key`
+    // is the field for this; fall back to the raw host only if the daemon didn't supply it.
+    const host = live?.host_key ?? live?.host ?? "";
     const pane = live?.pane ?? "";
 
     const wrap = parent.createDiv({ cls: "jarvis-dash-controls" });
