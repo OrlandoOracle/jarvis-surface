@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+"""phi-result-page — the Oracle-resident result-page writer for jarvis-phi-oracle
+(Unit 3). It is the OTHER end of the Unit 2 boundary: where phi-value-engine confines
+raw rows to an Oracle-local out-file that Claude never reads, this consumes that same
+out-file and turns it into the thing Deborah's text actually links to — a result page
+WITH the full values in it — then hands back ONLY the URL.
+
+Project decision (batch3) in one sentence: "Result page WITH full values = the
+value-script writes the HTML directly to Oracle disk; Claude never sees filled output,
+only gets the URL to hand to Deborah's text." This script IS that value-script.
+
+The same two layers the engine holds, held here (fail closed if either is absent):
+
+  1. STRUCTURAL ISOLATION. The rendered HTML — which contains the full lead values —
+     is written to an Oracle-local file (mode 600). It is NEVER printed to stdout and
+     NEVER returned in a dict field. The only thing that returns to the caller is the
+     URL (or on-disk path), a row count, and the host. A Claude tool result can see
+     stdout and nothing else, so the values cannot reach Anthropic context through it.
+  2. HOST GUARD. Refuses to run unless it is on the designated PHI host (Oracle). The
+     whole point is that the filled page is produced where the values already live;
+     producing it anywhere else would be the mistake the project exists to prevent.
+     PHI_ENGINE_HOST overrides the detected hostname for tests ONLY.
+
+Serving is deliberately PARKED like scope_sql was: if `results_base_url` is not wired
+in queries.json, the page is still written to disk and its filesystem path is returned
+with served=false. Wiring a real tailscale-serve base URL on Oracle is a deploy step,
+not an inference this script makes.
+
+Exit 0 = rendered, URL/path on stdout. Exit 4 = host guard. Exit 2 = error (and the
+values, which live only in the out-file and the written HTML, never touch stdout).
+
+Stdlib only. Lives on Oracle; versioned in the jarvis-surface repo and deployed.
+"""
+import argparse
+import html
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+import time
+
+# The engine's filename is hyphenated (not importable); load it by path so this script
+# reuses one source of truth for load_config, the Refuse type, and the host guard.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_loader = importlib.machinery.SourceFileLoader("phi_value_engine",
+                                               os.path.join(_HERE, "phi-value-engine"))
+_spec = importlib.util.spec_from_loader("phi_value_engine", _loader)
+engine = importlib.util.module_from_spec(_spec)
+_loader.exec_module(engine)
+
+
+def _rows_from_out_file(out_file, columns):
+    """Read the engine's isolated out-file into a list of cell-lists. sqlite3's default
+    column separator is '|'; a declared `columns` list tells us how many cells to expect
+    but we never require the match — a line that does not split cleanly renders as one
+    wide cell rather than being dropped (this page is the place full values ARE shown)."""
+    with open(out_file, errors="replace") as f:
+        lines = [ln.rstrip("\n") for ln in f]
+    data = [ln for ln in lines if ln.strip()]
+    ncol = len(columns) if columns else 1
+    rows = []
+    for ln in data:
+        cells = ln.split("|") if ncol > 1 else [ln]
+        rows.append(cells)
+    return rows
+
+
+def _render_html(title, query, columns, rows, generated_ts):
+    """Build the full-value HTML page. Everything is html.escape'd so a value with
+    markup in it cannot break the page or inject script. This string contains PHI and
+    is written ONLY to the Oracle-local file — it is never returned to the caller."""
+    head_cells = columns or ["value"]
+    thead = "".join(f"<th>{html.escape(str(c))}</th>" for c in head_cells)
+    body_rows = []
+    for cells in rows:
+        tds = "".join(f"<td>{html.escape(str(c))}</td>" for c in cells)
+        body_rows.append(f"<tr>{tds}</tr>")
+    tbody = "\n".join(body_rows) or '<tr><td class="empty">(no rows)</td></tr>'
+    # Static timestamp passed in — Date.now()/new Date() are avoided for reproducible tests.
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S %Z", time.localtime(generated_ts))
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>{html.escape(title)}</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ font: 15px/1.5 -apple-system,system-ui,sans-serif; margin: 0; padding: 1rem;
+          background: Canvas; color: CanvasText; }}
+  h1 {{ font-size: 1.1rem; margin: 0 0 .25rem; }}
+  .meta {{ opacity: .6; font-size: .8rem; margin-bottom: 1rem; }}
+  .phi {{ display: inline-block; font-size: .7rem; font-weight: 700; letter-spacing: .04em;
+          padding: .1rem .4rem; border-radius: 4px; background: #b4121233; color: #ff6b6b; }}
+  .scroll {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
+  table {{ border-collapse: collapse; width: 100%; min-width: max-content; }}
+  th, td {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #8884; white-space: nowrap; }}
+  th {{ position: sticky; top: 0; background: Canvas; }}
+  td.empty {{ opacity: .5; font-style: italic; }}
+  tbody tr:nth-child(even) {{ background: #8881; }}
+</style></head><body>
+<h1><span class="phi">🔒 PHI</span> &nbsp;{html.escape(title)}</h1>
+<div class="meta">query <code>{html.escape(query)}</code> &middot; {len(rows)} row(s) &middot; generated {html.escape(stamp)} &middot; served from Oracle, local to the tailnet</div>
+<div class="scroll"><table><thead><tr>{thead}</tr></thead>
+<tbody>
+{tbody}
+</tbody></table></div>
+</body></html>"""
+
+
+def do_render(args):
+    cfg = engine.load_config(args.config or engine.DEFAULT_CONFIG)
+    host = engine.assert_phi_host(cfg)
+
+    out_file = os.path.expanduser(args.out_file)
+    if not os.path.isfile(out_file):
+        raise engine.Refuse(2, "out-file does not exist; nothing to render")
+
+    # Columns: prefer an explicit --columns, else the declared schema of the named query.
+    columns = None
+    if args.columns:
+        columns = [c.strip() for c in args.columns.split(",") if c.strip()]
+    elif args.query:
+        q = cfg["queries"].get(args.query)
+        if q:
+            columns = q.get("columns")
+
+    rows = _rows_from_out_file(out_file, columns)
+
+    results_dir = os.path.expanduser(cfg.get("results_dir", "~/.jarvis-phi/results"))
+    ts = int(args.now) if args.now is not None else int(time.time())
+    base = f"{args.query or 'result'}-{ts}"
+    out_html = os.path.join(results_dir, base + ".html")
+
+    title = args.title or (args.query or "PHI result")
+    page = _render_html(title, args.query or "result", columns, rows, ts)
+
+    os.makedirs(results_dir, exist_ok=True)
+    # 0o600 from creation so the filled page is never world-readable even briefly.
+    fd = os.open(out_html, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(page)
+
+    # The URL is the ONLY handle that goes back toward Claude. If serving is not wired,
+    # return the on-disk path and served=false rather than guessing an infra URL.
+    base_url = cfg.get("results_base_url")
+    if base_url:
+        url = base_url.rstrip("/") + "/" + os.path.basename(out_html)
+        served = True
+    else:
+        url = "file://" + out_html
+        served = False
+
+    return {
+        "ok": True,
+        "query": args.query,
+        "host": host,
+        "rows": len(rows),      # a COUNT, never the values
+        "out_html": out_html,   # on Oracle, mode 600
+        "url": url,
+        "served": served,
+    }
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="phi-result-page")
+    sub = p.add_subparsers(dest="mode", required=True)
+    r = sub.add_parser("render", help="render an engine out-file into a full-value page")
+    r.add_argument("--out-file", required=True, help="the phi-value-engine out-file to render")
+    r.add_argument("--query", help="the query name (used for the title + declared columns)")
+    r.add_argument("--title", help="page title (default: the query name)")
+    r.add_argument("--columns", help="override columns as a comma list")
+    r.add_argument("--config", help="registry path (default: queries.json beside this script)")
+    r.add_argument("--now", type=int, help="fixed unix ts for the filename+stamp (tests)")
+    args = p.parse_args(argv)
+
+    try:
+        if args.mode == "render":
+            result = do_render(args)
+            print(json.dumps(result, indent=2))
+            return 0
+    except engine.Refuse as e:
+        print(json.dumps({"ok": False, "refused": True, "code": e.code, "error": e.msg}))
+        return e.code
+    except Exception as e:  # noqa: BLE001 — fail closed, leak nothing
+        print(json.dumps({"ok": False, "refused": True, "code": 2,
+                          "error": f"result-page error: {type(e).__name__}"}))
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""phi-value-engine — the Oracle-resident value-touching wrapper for jarvis-phi-oracle
+(Unit 2). It is the enforcement core the project decided on: the ONE boundary is that
+raw lead values never enter Anthropic/LLM context, and this is where that boundary is
+made structural instead of merely intended.
+
+What it does, in one sentence: it runs a registered value-touching command on Oracle,
+sends every byte of that command's raw output to an Oracle-local file the orchestrating
+Claude never reads, and hands back ONLY counts / schema / a de-id'd sample on stdout.
+
+The two layers (both must hold — fail closed if either is absent):
+
+  1. STRUCTURAL ISOLATION. The query runs as a subprocess whose stdout AND stderr are
+     redirected to an out-file on Oracle disk (mode 600). The engine process captures
+     none of it. There is no code path by which the raw rows return through this
+     process's stdout — which is the only thing a Claude tool result can see.
+
+  2. DE-ID GATE. Anything the engine DOES emit (an optional sample) is passed through
+     phi_deid first. Default posture is drop-on-doubt: a sample line that is not
+     provably clean is discarded, not masked. `--redact` switches to masking for the
+     case where a value is expected and masking is the point.
+
+Three fail-closed refusals, each its own exit code so the caller can tell them apart:
+
+  * HOST GUARD (exit 4): refuses to run unless it is on the designated PHI host. On the
+    Mini or anywhere else there is no canonical his-book store, and running there would
+    be the exact mistake the project exists to prevent. PHI_ENGINE_HOST overrides the
+    detected hostname for tests ONLY.
+  * UNKNOWN QUERY (exit 3): only registry-declared queries run. Freeform SQL from the
+    caller is never executed — the caller names a query, it does not write one.
+  * UNSCOPED QUERY (exit 5) / SCOPE NOT WIRED (exit 6): every registered query MUST
+    carry the scope token, which expands to the `assignedTo == <Sebastian>` clause that
+    confines results to HIS book (project decision: never the full AFHC corpus). A
+    query template missing the token is refused outright (5); a token present but no
+    scope clause configured yet is refused as not-wired (6) — this is the Oracle-schema
+    gate surfacing cleanly rather than guessing a column name.
+
+Exit 0 = ran, summary on stdout. Exit 2 = engine error (and NOTHING leaks to stdout).
+
+Stdlib only. Lives on Oracle; versioned in the jarvis-surface repo and deployed.
+"""
+import argparse
+import json
+import os
+import socket
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import phi_deid  # noqa: E402  (sibling module, same dir)
+
+DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "queries.json")
+
+
+class Refuse(Exception):
+    """A fail-closed refusal. `code` is the process exit code; `msg` is safe to print
+    (it never contains a value — refusals happen before any value is read)."""
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code = code
+        self.msg = msg
+
+
+def load_config(path):
+    with open(path) as f:
+        cfg = json.load(f)
+    cfg.setdefault("phi_host", [])
+    cfg.setdefault("scope_token", "{{SEB_SCOPE}}")
+    cfg.setdefault("scope_sql", None)
+    cfg.setdefault("results_dir", "~/.jarvis-phi/results")
+    cfg.setdefault("queries", {})
+    return cfg
+
+
+def assert_phi_host(cfg):
+    host = os.environ.get("PHI_ENGINE_HOST") or socket.gethostname()
+    if host not in cfg["phi_host"]:
+        raise Refuse(4, f"host guard: {host!r} is not a designated PHI host; refusing. "
+                        f"This engine runs only on Oracle (fail-closed).")
+    return host
+
+
+def resolve_query(cfg, name):
+    q = cfg["queries"].get(name)
+    if q is None:
+        known = ", ".join(sorted(cfg["queries"])) or "(none wired yet)"
+        raise Refuse(3, f"unknown query {name!r}; registered: {known}")
+    return q
+
+
+def scoped_cmd(cfg, q):
+    """Return the argv to run, with the scope token expanded. Refuses a query that is
+    not scoped to Sebastian's book, and a token that has no clause wired yet."""
+    token = cfg["scope_token"]
+    cmd = list(q.get("cmd") or [])
+    if not cmd:
+        raise Refuse(5, "query has no cmd; refusing")
+    if not any(token in part for part in cmd):
+        raise Refuse(5, f"query is not scoped (missing {token!r}); a query that could "
+                        f"touch non-Sebastian rows never runs")
+    scope_sql = cfg.get("scope_sql")
+    if scope_sql is None:
+        raise Refuse(6, f"scope token present but scope_sql not configured yet — the "
+                        f"assignedTo clause is parked until the Oracle schema is "
+                        f"confirmed. Not guessing a column name (fail-closed).")
+    return [part.replace(token, scope_sql) for part in cmd]
+
+
+def run_isolated(cmd, out_file, args_env):
+    """Run cmd with stdout+stderr -> out_file (mode 600). Returns the exit code only;
+    the engine never reads cmd's output stream."""
+    os.makedirs(os.path.dirname(out_file), exist_ok=True)
+    env = dict(os.environ)
+    for k, v in (args_env or {}).items():
+        env[f"PHI_ARG_{k}"] = v
+    # Open with 0o600 from the start so the file is never world-readable even briefly.
+    fd = os.open(out_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as fh:
+            proc = subprocess.run(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env)
+        return proc.returncode
+    except FileNotFoundError as e:
+        raise Refuse(2, f"query command not found: {e}")
+
+
+def summarize(out_file, q, sample, redact):
+    """Build the ONLY thing that returns to the caller: counts + declared schema +
+    an optional de-id'd sample. Reads the out-file HERE, inside the engine, and lets
+    nothing but cleaned/counted derivatives escape."""
+    rows = 0
+    try:
+        with open(out_file, errors="replace") as f:
+            lines = [ln.rstrip("\n") for ln in f]
+    except OSError:
+        lines = []
+    data = [ln for ln in lines if ln.strip()]
+    rows = len(data)
+
+    out = {
+        "rows": rows,
+        "columns": q.get("columns"),          # declared schema, no values
+        "out_file": out_file,                 # on Oracle, mode 600 — the caller may fetch locally
+        "summary_type": q.get("summary", "count"),
+    }
+
+    if sample:
+        shown, dropped = [], 0
+        for ln in data[:sample]:
+            if redact:
+                shown.append(phi_deid.redact(ln))
+            elif phi_deid.is_clean(ln):
+                shown.append(ln)
+            else:
+                dropped += 1                   # drop-on-doubt: a not-provably-clean line never shows
+        out["sample"] = shown
+        out["sample_mode"] = "redact" if redact else "clean-only"
+        out["sample_dropped"] = dropped
+    return out
+
+
+def do_run(args):
+    cfg = load_config(args.config or DEFAULT_CONFIG)
+    host = assert_phi_host(cfg)
+    q = resolve_query(cfg, args.query)
+    cmd = scoped_cmd(cfg, q)
+
+    results_dir = os.path.expanduser(cfg["results_dir"])
+    ts = int(time.time())
+    out_file = os.path.join(results_dir, f"{args.query}-{ts}.out")
+
+    args_env = {}
+    for pair in (args.arg or []):
+        if "=" not in pair:
+            raise Refuse(2, f"--arg must be k=v, got {pair!r}")
+        k, v = pair.split("=", 1)
+        args_env[k] = v
+
+    code = run_isolated(cmd, out_file, args_env)
+    result = summarize(out_file, q, args.sample, args.redact)
+    result.update({"query": args.query, "host": host, "status": code, "ok": code == 0})
+    return result
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(prog="phi-value-engine")
+    sub = p.add_subparsers(dest="mode", required=True)
+    r = sub.add_parser("run", help="run a registered query, isolated")
+    r.add_argument("--query", required=True)
+    r.add_argument("--arg", action="append", help="k=v, passed to the query as PHI_ARG_k")
+    r.add_argument("--sample", type=int, default=0, help="emit up to N de-id'd rows")
+    r.add_argument("--redact", action="store_true",
+                   help="mask values in the sample instead of dropping dirty lines")
+    r.add_argument("--config", help="registry path (default: queries.json beside this script)")
+    args = p.parse_args(argv)
+
+    try:
+        if args.mode == "run":
+            result = do_run(args)
+            print(json.dumps(result, indent=2))
+            return 0 if result.get("ok") else 1
+    except Refuse as e:
+        # A refusal is safe to print: it is raised before any value is read.
+        print(json.dumps({"ok": False, "refused": True, "code": e.code, "error": e.msg}))
+        return e.code
+    except Exception as e:  # noqa: BLE001 — fail closed, leak nothing
+        print(json.dumps({"ok": False, "refused": True, "code": 2,
+                          "error": f"engine error: {type(e).__name__}"}))
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

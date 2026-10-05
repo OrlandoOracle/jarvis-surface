@@ -1,0 +1,19 @@
+{
+  "_comment": "phi-value-engine registry (jarvis-phi-oracle Unit 2). The scope machinery is live; the real his-book query is PARKED until the Oracle mirror schema is confirmed. Do NOT fill scope_sql or a query cmd by guessing a column name — that is the one inference this whole unit refuses to make. When Oracle is reachable: read the real schema of ~/deborah-brain/mirror/mirror.db (the assignedTo column + Sebastian's GHL user id z64lpL3Vfx3o8hlEHF7v per memory reference-my-leads-filter-ghl), set scope_sql to the exact clause, and give each query a real cmd that contains {{SEB_SCOPE}}.",
+
+  "phi_host": ["sebastian-gerhardt-B550M-AORUS-PRO-P"],
+  "scope_token": "{{SEB_SCOPE}}",
+  "scope_sql": null,
+  "results_dir": "~/.jarvis-phi/results",
+  "_results_base_url_comment": "PARKED (Unit 3). The tailscale-serve base URL on Oracle that fronts results_dir. Null = the result page is still written to disk but phi-result-page returns a file:// path with served=false. Wire this to the real Oracle serve root when serving is set up — do NOT guess it.",
+  "results_base_url": null,
+
+  "queries": {
+    "my-leads-count": {
+      "desc": "PARKED: count of leads in Sebastian's book. The cmd shape is illustrative only — the engine refuses it (exit 6: scope not wired) until scope_sql is set from the confirmed Oracle schema. Verify the table/column names against the real ~/deborah-brain/mirror/mirror.db before trusting this template.",
+      "cmd": ["sqlite3", "-noheader", "~/deborah-brain/mirror/mirror.db", "SELECT count(*) FROM contacts WHERE {{SEB_SCOPE}}"],
+      "columns": ["count"],
+      "summary": "count"
+    }
+  }
+}
