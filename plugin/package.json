@@ -1,0 +1,19 @@
+{
+  "name": "jarvis-surface",
+  "version": "0.1.0",
+  "description": "The one unified JARVIS surface for Obsidian — board + remote + ask-loop, consolidated.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit --skipLibCheck",
+    "build": "npm run typecheck && node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "builtin-modules": "^4.0.0",
+    "esbuild": "^0.24.0",
+    "obsidian": "^1.13.1",
+    "typescript": "^5.7.0"
+  }
+}
