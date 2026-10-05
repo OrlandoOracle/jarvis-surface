@@ -551,17 +551,19 @@ const server = http.createServer((req, res) => {
   // the keystone validates it, then injects the daemon STEER_TOKEN when proxying. No
   // client ever holds the raw daemon key. The bearer query param is harmless to the
   // daemon (it reads host/pane) and is not logged here.
-  const isMenu = req.method === "GET" && /\/menu\/?$/.test(p);
+  // /menu and /pane are both token-gated GET reads of pane content (a menu, a
+  // transcript tail) — same cmd-bearer-in, daemon-token-injected-out as the writes.
+  const tokenGet = req.method === "GET" ? p.match(/\/(menu|pane)\/?$/) : null;
   const steerPost = req.method === "POST" ? p.match(/\/(say|choose|interrupt)\/?$/) : null;
-  if (isMenu || steerPost) {
+  if (tokenGet || steerPost) {
     if (!bearerOk(u.searchParams.get("bearer"))) {
       return endJson(res, 401, { error: "bad or missing bearer" });
     }
     if (!STEER_TOKEN) {
       return endJson(res, 503, { error: "steer token not configured on keystone" });
     }
-    if (isMenu) {
-      return proxyDaemonReq("GET", "/menu" + (u.search || ""), STEER_TOKEN, null, res);
+    if (tokenGet) {
+      return proxyDaemonReq("GET", "/" + tokenGet[1] + (u.search || ""), STEER_TOKEN, null, res);
     }
     return withBody(req, res, (buf) =>
       proxyDaemonReq("POST", "/" + steerPost[1], STEER_TOKEN, buf, res),

@@ -6502,6 +6502,25 @@ var SteerClient = class {
       return { kind: "error", status: 0, error: e instanceof Error ? e.message : String(e) };
     }
   }
+  /** Read-only transcript tail of a session's active pane. Unlike `menu`, the target
+   *  is a session NAME (what the feed reports), which the daemon resolves to the active
+   *  pane server-side. Same keystone bearer + PHI fence as every other read. */
+  async tail(host, name, lines = 200) {
+    if (!this.configured) {
+      return { kind: "error", status: 0, error: "steering not configured" };
+    }
+    const url = trimBase(this.base) + "/pane?host=" + encodeURIComponent(host) + "&name=" + encodeURIComponent(name) + "&lines=" + String(lines) + "&" + this.bearerQuery();
+    try {
+      const r = await (0, import_obsidian.requestUrl)({ url, method: "GET", throw: false });
+      if (r.status !== 200) {
+        return { kind: "error", status: r.status, error: this.errFrom(r.status, r.text) };
+      }
+      const body = r.json ?? JSON.parse(r.text);
+      return { kind: "tail", pane: body.pane ?? "", text: body.tail ?? "" };
+    } catch (e) {
+      return { kind: "error", status: 0, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
   async post(sub, payload, okDetail) {
     if (!this.configured) {
       return { kind: "error", status: 0, error: "steering not configured" };
@@ -6825,6 +6844,11 @@ var DashboardModal = class extends import_obsidian2.Modal {
 
 // src/views/sessions.ts
 var import_obsidian3 = require("obsidian");
+var TAIL_REFRESH_MS = 5e3;
+var TAIL_LINES = 200;
+function rowKey(s) {
+  return `${s.host}:${s.name}`;
+}
 var VIEW_TYPE_SESSIONS = "jarvis-sessions";
 var SESSIONS_REFRESH_MS = 3e4;
 var JarvisSessionsView = class extends import_obsidian3.ItemView {
@@ -6835,6 +6859,25 @@ var JarvisSessionsView = class extends import_obsidian3.ItemView {
   rows = [];
   status = "loading";
   errorMsg = "";
+  /** Row keys whose transcript tail is currently expanded. Survives feed redraws. */
+  expanded = /* @__PURE__ */ new Set();
+  /** Per-expanded-row tail poll timers, so a redraw can clear stale ones cleanly. */
+  tailTimers = /* @__PURE__ */ new Map();
+  /** Steer client built from live settings — same keystone front + cmd bearer the
+   *  dashboard uses. `/pane` (transcript tail) is a read behind that same bearer. */
+  buildSteer() {
+    const s = this.host.getSettings();
+    return new SteerClient(s.board.daemonUrl, s.remote.bearer);
+  }
+  /** Clear every open tail poll — called before a redraw (whose DOM the timers point
+   *  into) and on view close. */
+  clearTailTimers() {
+    for (const id of this.tailTimers.values()) window.clearInterval(id);
+    this.tailTimers.clear();
+  }
+  async onClose() {
+    this.clearTailTimers();
+  }
   getViewType() {
     return VIEW_TYPE_SESSIONS;
   }
@@ -6880,6 +6923,7 @@ var JarvisSessionsView = class extends import_obsidian3.ItemView {
     }
   }
   draw() {
+    this.clearTailTimers();
     const root = this.contentEl;
     root.empty();
     root.addClass("jarvis-sessions");
@@ -6905,7 +6949,43 @@ var JarvisSessionsView = class extends import_obsidian3.ItemView {
       root.createDiv({ cls: "cockpit-empty", text: "No sessions reported." });
       return;
     }
-    for (const s of this.rows) renderSessionRow(root, s);
+    for (const s of this.rows) this.drawRow(root, s);
+  }
+  /** One session row + (when running) a tappable transcript-tail panel. */
+  drawRow(root, s) {
+    const card = renderSessionRow(root, s);
+    if (!s.running) return;
+    const key = rowKey(s);
+    const toggle = card.createEl("button", {
+      cls: "jarvis-tail-toggle",
+      text: this.expanded.has(key) ? "\u25BE hide output" : "\u25B8 show output"
+    });
+    toggle.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      if (this.expanded.has(key)) this.expanded.delete(key);
+      else this.expanded.add(key);
+      this.draw();
+    });
+    if (!this.expanded.has(key)) return;
+    const pre = card.createEl("pre", { cls: "jarvis-tail", text: "loading output\u2026" });
+    void this.updateTail(pre, s);
+    const id = window.setInterval(() => void this.updateTail(pre, s), TAIL_REFRESH_MS);
+    this.tailTimers.set(key, id);
+  }
+  /** Fetch the pane tail and write it into `pre`, keeping the view scrolled to newest. */
+  async updateTail(pre, s) {
+    const steer = this.buildSteer();
+    if (!steer.configured) {
+      pre.setText("Set the device bearer (Settings \u2192 JARVIS Surface \u2192 Remote) to read output.");
+      return;
+    }
+    const r = await steer.tail(s.host, s.name, TAIL_LINES);
+    if (r.kind === "error") {
+      pre.setText(`output unavailable: ${r.error}`);
+      return;
+    }
+    pre.setText(r.text.replace(/\s+$/, "") || "(pane is empty)");
+    pre.scrollTop = pre.scrollHeight;
   }
 };
 function renderSessionRow(root, s) {
@@ -6927,6 +7007,7 @@ function renderSessionRow(root, s) {
   meta.createSpan({ text: s.running ? `${s.windows}w \xB7 ${s.ago}` : "not running" });
   const note = (s.note || s.pane_title || "").trim();
   if (note) card.createDiv({ cls: "session-card-pane", text: note });
+  return card;
 }
 
 // src/views/terminal.ts

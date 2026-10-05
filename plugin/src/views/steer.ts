@@ -28,6 +28,11 @@ export type MenuResult =
   | { kind: "none"; tail: string } // steering on, but the pane shows no menu
   | { kind: "error"; status: number; error: string };
 
+/** The read-only transcript tail of a session's active pane. */
+export type TailResult =
+  | { kind: "tail"; pane: string; text: string }
+  | { kind: "error"; status: number; error: string };
+
 export type SteerResult =
   | { kind: "ok"; detail: string }
   /** 409: well-formed + authed, but the WORLD said no (wrong pane, PHI host, menu moved). */
@@ -95,6 +100,35 @@ export class SteerClient {
         return { kind: "menu", menu: body.menu };
       }
       return { kind: "none", tail: body.tail ?? "" };
+    } catch (e) {
+      return { kind: "error", status: 0, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** Read-only transcript tail of a session's active pane. Unlike `menu`, the target
+   *  is a session NAME (what the feed reports), which the daemon resolves to the active
+   *  pane server-side. Same keystone bearer + PHI fence as every other read. */
+  async tail(host: string, name: string, lines = 200): Promise<TailResult> {
+    if (!this.configured) {
+      return { kind: "error", status: 0, error: "steering not configured" };
+    }
+    const url =
+      trimBase(this.base) +
+      "/pane?host=" +
+      encodeURIComponent(host) +
+      "&name=" +
+      encodeURIComponent(name) +
+      "&lines=" +
+      String(lines) +
+      "&" +
+      this.bearerQuery();
+    try {
+      const r = await requestUrl({ url, method: "GET", throw: false });
+      if (r.status !== 200) {
+        return { kind: "error", status: r.status, error: this.errFrom(r.status, r.text) };
+      }
+      const body = (r.json ?? JSON.parse(r.text)) as { pane?: string; tail?: string };
+      return { kind: "tail", pane: body.pane ?? "", text: body.tail ?? "" };
     } catch (e) {
       return { kind: "error", status: 0, error: e instanceof Error ? e.message : String(e) };
     }

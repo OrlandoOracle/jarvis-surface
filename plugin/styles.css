@@ -830,3 +830,31 @@ body.is-mobile.po-term-fullscreen .workspace-tab-header-container {
   font-size: 0.9em;
   line-height: 1.5;
 }
+
+/* ── JARVIS session transcript tail (Phase-1 #1) ─────────────────────────── */
+.jarvis-tail-toggle {
+  margin-top: 6px;
+  padding: 2px 8px;
+  font-size: 0.78em;
+  background: transparent;
+  color: var(--text-muted);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.jarvis-tail-toggle:hover { color: var(--text-normal); }
+.jarvis-tail {
+  margin-top: 6px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  background: #120e19;
+  color: #f4f1fb;
+  border: 1px solid #2a2140;
+  border-radius: 8px;
+  font-family: 'SFMono-Regular', Menlo, Monaco, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
